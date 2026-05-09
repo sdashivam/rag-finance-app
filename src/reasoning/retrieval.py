@@ -9,14 +9,14 @@ import faiss
 from sentence_transformers import SentenceTransformer
 
 
-class FAISSRetriever:
+class FAISSRetriever: 
     """Loads a FAISS index and metadata to retrieve relevant chunks for a query."""
 
     def __init__(
         self,
         index_path: str,
         metadata_path: str,
-        model_name: str = "all-MiniLM-L6-v2",
+        model_name: str,
         top_k: int = 3,
     ):
         """
@@ -64,12 +64,21 @@ class FAISSRetriever:
         """
         return self.model.encode([text], convert_to_numpy=True).astype("float32")
 
-    def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict]:
+    def _matches_filters(self, metadata: Dict, filters: Dict) -> bool:
+        """Checks if the metadata dictionary matches the provided filters."""
+        for key, value in filters.items():
+            if metadata.get(key) != value:
+                return False
+        return True
+
+    def retrieve(self, query: str, filters: Optional[Dict] = None, top_k: Optional[int] = None) -> List[Dict]:
         """
         Retrieves the most similar text chunks for a single query using FAISS.
+        Supports metadata filtering by scanning a larger candidate pool.
 
         Args:
             query (str): The query string.
+            filters (Optional[Dict]): Metadata filters (e.g., {"page": 5}).
             top_k (Optional[int]): Number of results to return. Defaults to self.top_k.
 
         Returns:
@@ -80,14 +89,22 @@ class FAISSRetriever:
 
         assert self.index is not None, "FAISS index must be loaded before searching"
         top_k = top_k or self.top_k
+        
+        # If filters are applied, search for more candidates to ensure we find enough matches
+        search_k = top_k * 10 if filters else top_k
         vector = self.embed(query)
-        distances, indices = self.index.search(vector.reshape(1, -1), top_k)
+        distances, indices = self.index.search(vector.reshape(1, -1), search_k)
 
         results = []
         for score, idx in zip(distances[0], indices[0]):
             if idx < 0 or idx >= len(self.metadata):
                 continue
             entry = self.metadata[idx]
+            
+            # Apply metadata-aware filtering
+            if filters and not self._matches_filters(entry.get("metadata", {}), filters):
+                continue
+
             results.append(
                 {
                     "query": query,
@@ -97,20 +114,99 @@ class FAISSRetriever:
                     "source_type": "faiss",
                 }
             )
+            
+            if len(results) >= top_k:
+                break
         return results
 
-    def retrieve_for_queries(self, queries: List[str], top_k: Optional[int] = None) -> Dict[str, List[Dict]]:
+    def retrieve_for_queries(self, queries: List[str], filters: Optional[Dict] = None, top_k: Optional[int] = None) -> Dict[str, List[Dict]]:
         """
         Batch retrieves results for multiple sub-queries.
 
         Args:
             queries (List[str]): List of query strings.
+            filters (Optional[Dict]): Metadata filters to apply to all queries.
             top_k (Optional[int]): Number of results per query.
 
         Returns:
             Dict[str, List[Dict]]: Mapping of query string to its list of results.
         """
-        return {query: self.retrieve(query, top_k) for query in queries}
+        return {query: self.retrieve(query, filters, top_k) for query in queries}
+
+
+class BM25Retriever:
+    """Keyword-based retriever using the BM25 algorithm on document chunks."""
+
+    def __init__(self, corpus_metadata: List[Dict], top_k: int = 3):
+        """
+        Initializes the BM25 retriever.
+
+        Args:
+            corpus_metadata (List[Dict]): List of chunks with 'text' and 'metadata'.
+            top_k (int): Number of results to retrieve.
+        """
+        self.corpus_metadata = corpus_metadata
+        self.top_k = top_k
+        self.bm25 = None
+
+        try:
+            from rank_bm25 import BM25Okapi
+            tokenized_corpus = [self._tokenize(doc.get("text", "")) for doc in corpus_metadata]
+            if tokenized_corpus:
+                self.bm25 = BM25Okapi(tokenized_corpus)
+        except ImportError:
+            print("Warning: rank_bm25 not installed. BM25 retrieval will be disabled.")
+
+    def _tokenize(self, text: str) -> List[str]:
+        """Simple whitespace and punctuation tokenizer."""
+        return re.findall(r"\w+", text.lower())
+
+    def _matches_filters(self, metadata: Dict, filters: Dict) -> bool:
+        """Checks if the metadata dictionary matches the provided filters."""
+        for key, value in filters.items():
+            if metadata.get(key) != value:
+                return False
+        return True
+
+    def retrieve(self, query: str, filters: Optional[Dict] = None, top_k: Optional[int] = None) -> List[Dict]:
+        """
+        Retrieves the most relevant chunks using BM25 ranking.
+
+        Args:
+            query (str): User query.
+            filters (Optional[Dict]): Metadata filters.
+            top_k (Optional[int]): Results count.
+
+        Returns:
+            List[Dict]: Ranked results.
+        """
+        if not self.bm25:
+            return []
+
+        top_k = top_k or self.top_k
+        tokenized_query = self._tokenize(query)
+        scores = self.bm25.get_scores(tokenized_query)
+
+        ranked_indices = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+
+        results = []
+        for idx, score in ranked_indices:
+            if score <= 0:
+                continue
+            entry = self.corpus_metadata[idx]
+            if filters and not self._matches_filters(entry.get("metadata", {}), filters):
+                continue
+
+            results.append({
+                "query": query,
+                "score": float(score),
+                "text": entry.get("text", ""),
+                "metadata": entry.get("metadata", {}),
+                "source_type": "bm25",
+            })
+            if len(results) >= top_k:
+                break
+        return results
 
 
 class SQLiteRetriever:
@@ -148,12 +244,13 @@ class SQLiteRetriever:
         keywords = [tok for tok in tokens if tok not in stop_words]
         return keywords[:6]
 
-    def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict]:
+    def retrieve(self, query: str, filters: Optional[Dict] = None, top_k: Optional[int] = None) -> List[Dict]:
         """
         Retrieves table rows from SQLite using a keyword-based OR search.
 
         Args:
             query (str): The query string.
+            filters (Optional[Dict]): Metadata filters mapped to SQL columns.
             top_k (Optional[int]): Max number of rows to return.
 
         Returns:
@@ -166,7 +263,18 @@ class SQLiteRetriever:
 
         clauses = ["lower(table_data) LIKE ?" for _ in keywords]
         params: List[object] = [f"%{keyword}%" for keyword in keywords]
-        sql = f"SELECT file_source, page_number, table_data FROM financial_tables WHERE {' OR '.join(clauses)} LIMIT ?"
+        
+        sql = f"SELECT file_source, page_number, table_data FROM financial_tables WHERE ({' OR '.join(clauses)})"
+        
+        # Metadata-aware pre-filtering via SQL WHERE clause
+        if filters:
+            for key, val in filters.items():
+                # Map common metadata keys to table column names
+                col = "page_number" if key == "page" else "file_source" if key == "source" else key
+                sql += f" AND {col} = ?"
+                params.append(val)
+        
+        sql += " LIMIT ?"
         params.append(top_k)
 
         results = []
@@ -203,6 +311,7 @@ class HybridRetriever:
     def __init__(
         self,
         faiss_retriever: FAISSRetriever,
+        bm25_retriever: Optional[BM25Retriever] = None,
         sqlite_retriever: Optional[SQLiteRetriever] = None,
         top_k: int = 3,
     ):
@@ -211,19 +320,22 @@ class HybridRetriever:
 
         Args:
             faiss_retriever (FAISSRetriever): Instance for semantic search.
+            bm25_retriever (Optional[BM25Retriever]): Instance for keyword-based ranking.
             sqlite_retriever (Optional[SQLiteRetriever]): Instance for structured table search.
             top_k (int): Total results to return after merging.
         """
         self.faiss_retriever = faiss_retriever
+        self.bm25_retriever = bm25_retriever
         self.sqlite_retriever = sqlite_retriever
         self.top_k = top_k
 
-    def _merge(self, faiss_results: List[Dict], sqlite_results: List[Dict]) -> List[Dict]:
+    def _merge(self, faiss_results: List[Dict], bm25_results: List[Dict], sqlite_results: List[Dict]) -> List[Dict]:
         """
         Deduplicates and sorts results from different sources.
 
         Args:
             faiss_results (List[Dict]): Results from semantic search.
+            bm25_results (List[Dict]): Results from BM25 ranking.
             sqlite_results (List[Dict]): Results from SQL keyword search.
 
         Returns:
@@ -232,49 +344,61 @@ class HybridRetriever:
         combined = []
         seen_texts = set()
 
-        for item in faiss_results + sqlite_results:
+        for item in faiss_results + bm25_results + sqlite_results:
             text_key = item.get("text", "").strip()
             if not text_key or text_key in seen_texts:
                 continue
             seen_texts.add(text_key)
             combined.append(item)
 
-        # If SQLite results don't have score, keep FAISS scores first but preserve SQLite results too.
-        combined.sort(key=lambda x: (0 if x.get("source_type") == "faiss" else 1, x.get("score", 0.0)))
+        # Prioritize by source type then score. 
+        # FAISS (0) -> BM25 (1) -> SQLite (2).
+        # For FAISS (L2), lower is better. For BM25, higher is better.
+        combined.sort(key=lambda x: (
+            0 if x.get("source_type") == "faiss" else 
+            1 if x.get("source_type") == "bm25" else 2,
+            x.get("score", 0.0) if x.get("source_type") == "faiss" else -x.get("score", 0.0)
+        ))
         return combined[: self.top_k]
 
-    def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict]:
+    def retrieve(self, query: str, filters: Optional[Dict] = None, top_k: Optional[int] = None) -> List[Dict]:
         """
         Performs hybrid retrieval by calling both FAISS and SQLite.
 
         Args:
             query (str): The query string.
+            filters (Optional[Dict]): Metadata filters for both retrieval engines.
             top_k (Optional[int]): Number of results per source.
 
         Returns:
             List[Dict]: Merged and deduplicated results.
         """
         top_k = top_k or self.top_k
-        faiss_results = self.faiss_retriever.retrieve(query, top_k)
+        faiss_results = self.faiss_retriever.retrieve(query, filters, top_k)
+        bm25_results = []
+        if self.bm25_retriever:
+            bm25_results = self.bm25_retriever.retrieve(query, filters, top_k)
+            
         sqlite_results = []
         if self.sqlite_retriever:
-            sqlite_results = self.sqlite_retriever.retrieve(query, top_k)
+            sqlite_results = self.sqlite_retriever.retrieve(query, filters, top_k)
 
-        merged = self._merge(faiss_results, sqlite_results)
+        merged = self._merge(faiss_results, bm25_results, sqlite_results)
         return merged
 
-    def retrieve_for_queries(self, queries: List[str], top_k: Optional[int] = None) -> Dict[str, List[Dict]]:
+    def retrieve_for_queries(self, queries: List[str], filters: Optional[Dict] = None, top_k: Optional[int] = None) -> Dict[str, List[Dict]]:
         """
         Performs hybrid retrieval for a batch of queries.
 
         Args:
             queries (List[str]): List of query strings.
+            filters (Optional[Dict]): Metadata filters to apply.
             top_k (Optional[int]): Number of results per source per query.
 
         Returns:
             Dict[str, List[Dict]]: Mapping of query to merged results.
         """
-        return {query: self.retrieve(query, top_k) for query in queries}
+        return {query: self.retrieve(query, filters, top_k) for query in queries}
 
 
 class AnswerAggregator:
@@ -302,20 +426,24 @@ class AnswerAggregator:
         """
         prompt = [
             "You are an expert financial assistant.",
-            "Use only the retrieved evidence to answer the query accurately.",
+            "Your task is to answer the query based ONLY on the provided evidence.",
+            "For every statement or claim you make, you MUST cite the source index in brackets, e.g., [1].",
+            "If multiple sources support a claim, list them all, e.g., [1, 3].",
             "If the evidence is insufficient, say so clearly.",
-            "Provide a concise structured answer and list the sources.",
+            "Format the output as a concise answer followed by a 'References' list mapping indices to source metadata.",
             "",
             f"Query: {query}",
             "",
             "Retrieved evidence:"
         ]
 
-        for item in retrieval_results:
+        for i, item in enumerate(retrieval_results, 1):
             source_meta = item.get("metadata", {})
             prompt.append(
-                f"- Source: {item.get('source_type', 'unknown')} | page: {source_meta.get('page')} | section: {source_meta.get('type')} | text: {item.get('text','').strip()[:400]}"
+                f"[{i}] Source: {item.get('source_type', 'unknown')} (Page: {source_meta.get('page')}, Type: {source_meta.get('type')})"
             )
+            prompt.append(f"Content: {item.get('text','').strip()}")
+            prompt.append("")
 
         prompt.append("")
         prompt.append("Answer:")
@@ -337,8 +465,8 @@ class AnswerAggregator:
 
         if not self.llm:
             lines = [f"Query: {query}"]
-            for item in retrieval_results:
-                lines.append(f"- {item.get('source_type')} source page {item.get('metadata', {}).get('page')}: {item.get('text', '')[:200]}...")
+            for i, item in enumerate(retrieval_results, 1):
+                lines.append(f"[{i}] {item.get('source_type')} (Page {item.get('metadata', {}).get('page')}): {item.get('text', '')[:150]}...")
             return "\n".join(lines)
 
         try:

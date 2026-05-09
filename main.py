@@ -4,14 +4,15 @@ import time
 import numpy as np
 import json
 import logging
+from langchain_ollama import ChatOllama
+from src.ingestion.db_manager import SQLiteManager
 from src.ingestion.parsing import PDFParser
 from src.ingestion.indexing import SectionAwareChunker, FAISSIndexManager
 from src.reasoning.processor import QueryProcessor
-from src.reasoning.retrieval import (FAISSRetriever, SQLiteRetriever, HybridRetriever, AnswerAggregator)
-from langchain_ollama import ChatOllama
+from src.reasoning.retrieval import (FAISSRetriever, BM25Retriever, SQLiteRetriever, HybridRetriever, AnswerAggregator)
 from src.evaluation.feedback import FeedbackManager
 from src.evaluation.metrics import RAGMetrics
-from src.ingestion.db_manager import SQLiteManager
+
 
 """
 Main script for the Financial Report RAG QA System.
@@ -178,6 +179,11 @@ def main():
         top_k=retrieval_top_k,
     )
 
+    bm25_retriever = BM25Retriever(
+        corpus_metadata=faiss_retriever.metadata,
+        top_k=retrieval_top_k
+    )
+
     sqlite_retriever = None
     if os.path.exists(db_path):
         try:
@@ -187,6 +193,7 @@ def main():
 
     hybrid_retriever = HybridRetriever(
         faiss_retriever=faiss_retriever,
+        bm25_retriever=bm25_retriever,
         sqlite_retriever=sqlite_retriever,
         top_k=retrieval_top_k,
     )

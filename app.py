@@ -14,7 +14,7 @@ root_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(root_dir)
 
 from src.reasoning.processor import QueryProcessor
-from src.reasoning.retrieval import (FAISSRetriever, SQLiteRetriever, HybridRetriever, AnswerAggregator)
+from src.reasoning.retrieval import (FAISSRetriever, BM25Retriever, SQLiteRetriever, HybridRetriever, AnswerAggregator)
 from src.evaluation.feedback import FeedbackManager
 from langchain_ollama import ChatOllama
 
@@ -51,6 +51,11 @@ def initialize_rag(_config):
         model_name=_config['retriever_model'],
         top_k=_config['retrieval_top_k'],
     )
+
+    bm25_retriever = BM25Retriever(
+        corpus_metadata=faiss_retriever.metadata,
+        top_k=_config['retrieval_top_k'],
+    )
     
     sqlite_retriever = None
     if os.path.exists(db_path):
@@ -58,6 +63,7 @@ def initialize_rag(_config):
 
     hybrid_retriever = HybridRetriever(
         faiss_retriever=faiss_retriever,
+        bm25_retriever=bm25_retriever,
         sqlite_retriever=sqlite_retriever,
         top_k=_config['retrieval_top_k'],
     )
