@@ -11,14 +11,13 @@ env/
 
 # Artifacts and Data
 # Ignore the output directory and its contents (FAISS index, metadata, etc.)
-data/
+input/*.pdf
 
 # Databases
 *.db
 *.sqlite
 *.faiss
 *.pkl
-*.pdf
 
 # Metrics and Logs
 *.json
