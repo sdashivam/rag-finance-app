@@ -18,6 +18,7 @@ data/
 *.sqlite
 *.faiss
 *.pkl
+*.pdf
 
 # Metrics and Logs
 *.json
