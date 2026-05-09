@@ -1,0 +1,14 @@
+input_path: "./input"
+input_file_name: "FY25_financial_statements.pdf"
+output_path: "./output"
+output_file: "index.faiss"
+metadata_file: "metadata.pkl"
+db_path: "./output/financial_data.db"
+llm_model: "llama3"
+llm_temperature: 0.1
+llm_base_url: "http://localhost:11434"
+embedding_model: "all-MiniLM-L6-v2"
+retriever_model: "all-MiniLM-L6-v2"
+retrieval_top_k: 3
+sample_query: >-
+  total borrowing in india as of 31 March 2025?

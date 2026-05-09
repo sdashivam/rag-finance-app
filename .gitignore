@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+virtual/
+env/
+
+# Artifacts and Data
+# Ignore the output directory and its contents (FAISS index, metadata, etc.)
+output/
+data/
+
+# Databases
+*.db
+*.sqlite
+
+# Metrics and Logs
+rag_metrics.json
+*.log
+
+# FAISS Index files (if stored outside output/)
+*.index
+*.pkl
+
+# Configuration
+# It is often better to commit a config.example.yaml instead of config.yaml
+# if it contains local paths or credentials.
+# config.yaml
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+
+# OS generated files
+.DS_Store
+Thumbs.db

@@ -99,16 +99,23 @@ This project implements an **end-to-end RAG pipeline** with:
 /rag-finance-app
   /assets
     rag_architecture.png
-  /backend
-    main.py
-    retrieval.py
-    reasoning.py
-  /frontend
-    app.py
-  /evaluation
-    metrics.py
-  /data
-  Dockerfile
+  /input
+  /output
+  /src
+    /evaluation
+      feedback.py
+      metrics.py
+    /ingestion
+      db_connection.py
+      db_manager.py
+      indexing.py
+      parsing.py
+    /reasoning
+      processor.py
+      retrieval.py
+  app.py
+  main.py
+  config.yaml
   requirements.txt
   README.md
 ```
@@ -146,7 +153,7 @@ OPENAI_API_KEY=your_key
 ### 5. Run Backend (FastAPI)
 
 ```bash
-uvicorn backend.main:app --reload
+uvicorn main:app --reload
 ```
 
 ### 6. Run Frontend (Streamlit)
