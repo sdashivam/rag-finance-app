@@ -19,6 +19,15 @@ class FAISSRetriever:
         model_name: str = "all-MiniLM-L6-v2",
         top_k: int = 3,
     ):
+        """
+        Initializes the FAISS retriever.
+
+        Args:
+            index_path (str): Path to the saved .faiss index file.
+            metadata_path (str): Path to the pickled metadata file.
+            model_name (str): SentenceTransformer model name for embeddings.
+            top_k (int): Default number of documents to retrieve.
+        """
         self.index_path = Path(index_path)
         self.metadata_path = Path(metadata_path)
         self.model = SentenceTransformer(model_name)
@@ -28,6 +37,12 @@ class FAISSRetriever:
         self._load_index()
 
     def _load_index(self):
+        """
+        Loads the FAISS index from disk and unpickles the associated metadata.
+
+        Raises:
+            FileNotFoundError: If index or metadata files are missing.
+        """
         if not self.index_path.exists():
             raise FileNotFoundError(f"FAISS index file not found at {self.index_path}")
         if not self.metadata_path.exists():
@@ -38,9 +53,28 @@ class FAISSRetriever:
             self.metadata = pickle.load(f)
 
     def embed(self, text: str):
+        """
+        Generates a vector embedding for the given text.
+
+        Args:
+            text (str): The input string to embed.
+
+        Returns:
+            numpy.ndarray: The float32 embedding vector.
+        """
         return self.model.encode([text], convert_to_numpy=True).astype("float32")
 
     def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict]:
+        """
+        Retrieves the most similar text chunks for a single query using FAISS.
+
+        Args:
+            query (str): The query string.
+            top_k (Optional[int]): Number of results to return. Defaults to self.top_k.
+
+        Returns:
+            List[Dict]: A list of result dictionaries containing text, score, and metadata.
+        """
         if self.index is None:
             self._load_index()
 
@@ -66,6 +100,16 @@ class FAISSRetriever:
         return results
 
     def retrieve_for_queries(self, queries: List[str], top_k: Optional[int] = None) -> Dict[str, List[Dict]]:
+        """
+        Batch retrieves results for multiple sub-queries.
+
+        Args:
+            queries (List[str]): List of query strings.
+            top_k (Optional[int]): Number of results per query.
+
+        Returns:
+            Dict[str, List[Dict]]: Mapping of query string to its list of results.
+        """
         return {query: self.retrieve(query, top_k) for query in queries}
 
 
@@ -73,12 +117,28 @@ class SQLiteRetriever:
     """Retrieves candidate table rows from SQLite based on query keywords."""
 
     def __init__(self, db_path: str, top_k: int = 3):
+        """
+        Initializes the SQLite retriever.
+
+        Args:
+            db_path (str): Path to the SQLite database.
+            top_k (int): Number of table rows to retrieve.
+        """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"SQLite database not found at {self.db_path}")
         self.top_k = top_k
 
     def _query_keywords(self, query: str) -> List[str]:
+        """
+        Extracts significant keywords from a query for SQL LIKE matching.
+
+        Args:
+            query (str): The user query.
+
+        Returns:
+            List[str]: A list of lowercase keywords, filtered for stop words.
+        """
         tokens = re.findall(r"\b[a-zA-Z]{3,}\b", query.lower())
         stop_words = {
             "what", "why", "how", "is", "the", "for", "and", "from",
@@ -89,6 +149,16 @@ class SQLiteRetriever:
         return keywords[:6]
 
     def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict]:
+        """
+        Retrieves table rows from SQLite using a keyword-based OR search.
+
+        Args:
+            query (str): The query string.
+            top_k (Optional[int]): Max number of rows to return.
+
+        Returns:
+            List[Dict]: Formatted table rows as text with metadata.
+        """
         top_k = top_k or self.top_k
         keywords = self._query_keywords(query)
         if not keywords:
@@ -136,11 +206,29 @@ class HybridRetriever:
         sqlite_retriever: Optional[SQLiteRetriever] = None,
         top_k: int = 3,
     ):
+        """
+        Initializes the HybridRetriever.
+
+        Args:
+            faiss_retriever (FAISSRetriever): Instance for semantic search.
+            sqlite_retriever (Optional[SQLiteRetriever]): Instance for structured table search.
+            top_k (int): Total results to return after merging.
+        """
         self.faiss_retriever = faiss_retriever
         self.sqlite_retriever = sqlite_retriever
         self.top_k = top_k
 
     def _merge(self, faiss_results: List[Dict], sqlite_results: List[Dict]) -> List[Dict]:
+        """
+        Deduplicates and sorts results from different sources.
+
+        Args:
+            faiss_results (List[Dict]): Results from semantic search.
+            sqlite_results (List[Dict]): Results from SQL keyword search.
+
+        Returns:
+            List[Dict]: Combined list sorted primarily by source then score.
+        """
         combined = []
         seen_texts = set()
 
@@ -156,6 +244,16 @@ class HybridRetriever:
         return combined[: self.top_k]
 
     def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict]:
+        """
+        Performs hybrid retrieval by calling both FAISS and SQLite.
+
+        Args:
+            query (str): The query string.
+            top_k (Optional[int]): Number of results per source.
+
+        Returns:
+            List[Dict]: Merged and deduplicated results.
+        """
         top_k = top_k or self.top_k
         faiss_results = self.faiss_retriever.retrieve(query, top_k)
         sqlite_results = []
@@ -166,6 +264,16 @@ class HybridRetriever:
         return merged
 
     def retrieve_for_queries(self, queries: List[str], top_k: Optional[int] = None) -> Dict[str, List[Dict]]:
+        """
+        Performs hybrid retrieval for a batch of queries.
+
+        Args:
+            queries (List[str]): List of query strings.
+            top_k (Optional[int]): Number of results per source per query.
+
+        Returns:
+            Dict[str, List[Dict]]: Mapping of query to merged results.
+        """
         return {query: self.retrieve(query, top_k) for query in queries}
 
 
@@ -173,9 +281,25 @@ class AnswerAggregator:
     """Aggregates retrieved content and produces a structured answer."""
 
     def __init__(self, llm=None):
+        """
+        Initializes the AnswerAggregator.
+
+        Args:
+            llm (Optional[Any]): The language model instance (e.g., ChatOllama).
+        """
         self.llm = llm
 
     def _build_prompt(self, query: str, retrieval_results: List[Dict]) -> str:
+        """
+        Constructs the instruction and context prompt for the LLM.
+
+        Args:
+            query (str): The original or sub-query.
+            retrieval_results (List[Dict]): List of retrieved context chunks.
+
+        Returns:
+            str: The fully formatted prompt.
+        """
         prompt = [
             "You are an expert financial assistant.",
             "Use only the retrieved evidence to answer the query accurately.",
@@ -198,6 +322,16 @@ class AnswerAggregator:
         return "\n".join(prompt)
 
     def aggregate_answer(self, query: str, retrieval_results: List[Dict]) -> str:
+        """
+        Generates a final answer for a single query based on retrieval context.
+
+        Args:
+            query (str): The query to answer.
+            retrieval_results (List[Dict]): The evidence chunks.
+
+        Returns:
+            str: The LLM-generated answer or a formatted summary if LLM fails.
+        """
         if not retrieval_results:
             return "No relevant evidence was retrieved to answer this query."
 
@@ -238,6 +372,16 @@ class AnswerAggregator:
             return "\n".join(lines)
 
     def aggregate_all(self, queries: List[str], retrieval_map: Dict[str, List[Dict]]) -> Dict[str, str]:
+        """
+        Processes a batch of queries and their respective retrieval results into answers.
+
+        Args:
+            queries (List[str]): List of sub-queries.
+            retrieval_map (Dict[str, List[Dict]]): Map of query to retrieval list.
+
+        Returns:
+            Dict[str, str]: Map of query to final answer string.
+        """
         return {
             query: self.aggregate_answer(query, retrieval_map.get(query, []))
             for query in queries

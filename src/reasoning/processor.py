@@ -139,7 +139,17 @@ class QueryProcessor:
             return self._fallback_regex_decompose(query)
     
     def _is_single_query_similar_to_original(self, original: str, single_query: str) -> bool:
-        """Check if the returned query is too similar to the original (not properly decomposed)."""
+        """
+        Check if the returned query is too similar to the original (not properly decomposed).
+        Uses Jaccard similarity heuristic on word sets.
+
+        Args:
+            original (str): The original user query.
+            single_query (str): The single sub-query returned by the LLM.
+
+        Returns:
+            bool: True if similarity exceeds the threshold (0.75), indicating poor decomposition.
+        """
         # Simple heuristic: if they share more than 80% of words, they're too similar
         original_words = set(original.lower().split())
         query_words = set(single_query.lower().split())

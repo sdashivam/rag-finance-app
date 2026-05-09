@@ -18,6 +18,16 @@ class SectionAwareChunker:
         )
 
     def chunk(self, parsed_data: dict) -> list[dict]:
+        """
+        Takes parsed data and produces chunks with section-aware metadata.
+        Each chunk is a dictionary with:
+        - "text": the chunked text content
+        - "metadata": a dictionary containing:
+        - "source": the original file path
+        - "page": the page number
+        - "section": the section name (if detected)
+        - "type": "text" or "table"
+        """
         chunks = []
         file_path = parsed_data["metadata"]["file_path"]
 
@@ -78,7 +88,15 @@ class FAISSIndexManager:
         self.index = None
         self.metadata = []
 
-    def build_index(self, chunks: list[dict]): # This method builds the index in memory
+    def build_index(self, chunks: list[dict]):
+        """
+        Builds a FAISS index from the provided chunks.
+            Each chunk is expected to be a dictionary with "text" and "metadata" keys.
+            The method generates embeddings for the text and builds a FAISS index in memory.
+            Metadata is stored in a list for later retrieval during querying.
+            The index is built using L2 distance (IndexFlatL2) for efficient similarity search.
+            The embeddings are converted to float32 before being added to the index, as required by FAISS.
+        """
         self.metadata = [{"text": c["text"], "metadata": c["metadata"]} for c in chunks]
         texts = [item["text"] for item in self.metadata]
         
@@ -90,11 +108,18 @@ class FAISSIndexManager:
         self.index.add(embeddings.astype("float32"))
         print("FAISS index built successfully.")
 
-    def save(self, output_path: str, index_filename: str = "index.faiss"): # This method saves the index to disk
+    def save(self, output_path: str, index_filename: str = "index.faiss", metadata_filename: str = "metadata.pkl"):
+        """
+        Saves the FAISS index and associated metadata to disk.
+            The FAISS index is saved as a binary file, while the metadata is serialized using pickle
+                and saved as a separate file. The method ensures that the output directory exists before saving.
+                The index is saved using the faiss.write_index function, and the metadata is saved using pickle.dump.
+                A confirmation message is printed upon successful saving of the index and metadata.
+        """
         path = Path(output_path)
         path.mkdir(parents=True, exist_ok=True)
         
         faiss.write_index(self.index, str(path / index_filename))
-        with open(path / "metadata.pkl", "wb") as f:
+        with open(path / metadata_filename, "wb") as f:
             pickle.dump(self.metadata, f)
         print(f"Index and metadata saved to {output_path}")

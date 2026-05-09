@@ -1,5 +1,6 @@
 import yaml
 import os
+import time
 import numpy as np
 import json
 import logging
@@ -7,12 +8,30 @@ from src.ingestion.parsing import PDFParser
 from src.ingestion.indexing import SectionAwareChunker, FAISSIndexManager
 from src.reasoning.processor import QueryProcessor
 from src.reasoning.retrieval import (FAISSRetriever, SQLiteRetriever, HybridRetriever, AnswerAggregator)
-from src.evaluation.metrics import RAGEvaluator
 from langchain_ollama import ChatOllama
 from src.evaluation.feedback import FeedbackManager
+from src.evaluation.metrics import RAGMetrics
 from src.ingestion.db_manager import SQLiteManager
 
+"""
+Main script for the Financial Report RAG QA System.
+This script orchestrates the entire RAG pipeline, including data ingestion, indexing,
+query processing, retrieval, answer aggregation, and evaluation.
+"""
+
 def main():
+    """
+    Executes the end-to-end RAG pipeline.
+    This includes:
+    1. Loading configuration.
+    2. Parsing PDF documents and storing structured data in SQLite.
+    3. Chunking documents and building a FAISS index for semantic retrieval.
+    4. Processing a sample query through query decomposition, hybrid retrieval,
+       and answer aggregation.
+    5. Logging the interaction for feedback.
+    6. Evaluating the retrieval and generation quality using RAGAS metrics.
+    7. Saving evaluation metrics to a JSON file.
+    """
     # Get the directory where main.py is located to resolve paths reliably
     base_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(base_dir, 'config.yaml')
@@ -95,7 +114,7 @@ def main():
         logger.info(f"Saving Semantic Retrival to FAISS index :{output_file_name}")
         indexer = FAISSIndexManager(model_name=embedding_model)
         indexer.build_index(chunks) # This builds the index in memory
-        indexer.save(output_path, output_file_name) # This saves the index to disk
+        indexer.save(output_path, output_file_name, metadata_file_name) # This saves the index to disk
 
     # 3. Query Processing (Demonstration)
     logger.info("--- Starting Query Reasoning Phase ---")
@@ -120,7 +139,15 @@ def main():
     
     # Pass the initialized LLM to the QueryProcessor
     query_processor = QueryProcessor(llm=llm_model)
+    metrics_engine = RAGMetrics()
+
+    # Capture Hardware Metrics
+    hw_metrics = metrics_engine.get_hardware_metrics()
+    logger.info(f"Hardware Stats - GPU Utilization: {hw_metrics['gpu_utilization_pct']}%, VRAM Usage: {hw_metrics['vram_usage_mb']:.2f} MB")
+
     sample_query = config.get("sample_query", "")
+    e2e_start_time = time.perf_counter()
+
     if not sample_query:
         raise ValueError("The 'sample_query' value must be set in config.yaml.")
 
@@ -164,12 +191,25 @@ def main():
         top_k=retrieval_top_k,
     )
 
+    # Measure Retrieval Phase (includes embedding generation)
+    retrieval_start_time = time.perf_counter()
     retrieval_results = hybrid_retriever.retrieve_for_queries(processed_queries)
+    embedding_latency = metrics_engine.measure_duration(retrieval_start_time)
+    logger.info(f"Embedding/Retrieval Latency: {embedding_latency:.4f}s")
+
+    # Measure Aggregation/Generation phase
+    gen_start_time = time.perf_counter()
     answer_aggregator = AnswerAggregator(llm=llm_model)
     aggregated_answers = answer_aggregator.aggregate_all(processed_queries, retrieval_results)
+    gen_duration = metrics_engine.measure_duration(gen_start_time)
+    
+    e2e_response_time = metrics_engine.measure_duration(e2e_start_time)
+    logger.info(f"End-to-End Response Time: {e2e_response_time:.4f}s")
     
     # Initialize FeedbackManager for logging evaluation runs
     feedback_mgr = FeedbackManager(db_path=db_path)
+
+    final_answer = "\n\n".join([f"Q: {q}\nA: {aggregated_answers.get(q, 'No answer generated.')}" for q in processed_queries])
 
     for i, sub_q in enumerate(processed_queries, 1):
         logger.info(f"Sub-query {i}: {sub_q}")
@@ -188,76 +228,98 @@ def main():
         logger.info("  Aggregated Answer:")
         logger.info(f"    {aggregated_answers.get(sub_q, 'No answer generated.')}")
 
+    token_speed = metrics_engine.calculate_token_speed(final_answer, gen_duration)
+    logger.info(f"Token Generation Speed: {token_speed:.2f} tokens/sec")
+
     # Log the overall session to the feedback database for future trend analysis
     feedback_mgr.log_interaction(
         query=sample_query,
-        answer="\n\n".join([f"Q: {q}\nA: {aggregated_answers.get(q)}" for q in processed_queries]),
+        answer=final_answer,
         contexts=[ctx for res in retrieval_results.values() for ctx in res],
         metadata={"run_type": "eval_script"}
     )
 
     # Evaluation
     logger.info("--- Evaluation Phase ---")
-    evaluator = RAGEvaluator()
 
     # For demonstration, using empty relevant docs since no ground truth available
     # In practice, provide actual relevant document IDs/texts
     relevant_docs = set()  # TODO: Replace with actual ground truth relevant documents
-
-    overall_retrieval_scores = []
-    overall_generation_scores = []
-
-    # Construct a consolidated final answer from sub-query answers for logging
-    final_answer = "\n\n".join([f"Q: {q}\nA: {aggregated_answers.get(q, 'No answer generated.')}" for q in processed_queries])
 
     all_metrics_data = {
         "query": sample_query,
         "final_answer": final_answer,
         "sub_queries": [],
         "overall_retrieval_scores": {},
-        "overall_generation_scores": {}
+        "overall_generation_scores": {},
+        "performance_metrics": {
+            "embedding_generation_latency": embedding_latency,
+            "end_to_end_response_time": e2e_response_time,
+            "token_generation_speed": token_speed,
+            "gpu_utilization_pct": hw_metrics["gpu_utilization_pct"],
+            "vram_usage_mb": hw_metrics["vram_usage_mb"]
+        },
+        "quality_metrics": {}
     }
+
+    # Calculate RAGAS Quality Metrics (Faithfulness, Relevancy, Precision, Recall)
+    all_contexts = [ctx['text'] for q_res in retrieval_results.values() for ctx in q_res]
+    
+    logger.info("Calculating RAGAS quality scores...")
+    quality_scores = metrics_engine.get_quality_scores(
+        query=sample_query,
+        answer=final_answer,
+        contexts=all_contexts,
+        llm=llm_model,
+        embeddings=faiss_retriever.model
+    )
+    all_metrics_data["quality_metrics"] = quality_scores
+    logger.info(f"Quality Metrics: {json.dumps(quality_scores, indent=2)}")
+
+    overall_retrieval_scores = []
+    overall_generation_scores = []
 
     for i, sub_q in enumerate(processed_queries, 1):
         logger.info(f"Evaluating Sub-query {i}: {sub_q}")
         answer = aggregated_answers.get(sub_q, '')
-        sub_query_metrics = {"sub_query": sub_q, "answer": answer, "retrieval": {}, "generation": {}}
+        sub_query_metrics = {
+            "sub_query": sub_q, 
+            "answer": answer, 
+            "retrieval": {"precision_at_k": 0.0}, 
+            "generation": {"relevance": 0.0, "groundedness": 0.0, "faithfulness": 0.0}
+        }
 
         # Retrieval Evaluation
         results = retrieval_results.get(sub_q, [])
         if results:
-            retrieval_scores = evaluator.evaluate_retrieval(results, relevant_docs, retrieval_top_k)
-            logger.info(f"  Retrieval - Precision@{retrieval_top_k}: {retrieval_scores['precision_at_k']:.4f}")
-            sub_query_metrics["retrieval"] = retrieval_scores
-            overall_retrieval_scores.append(retrieval_scores['precision_at_k'])
+            ret_scores = metrics_engine.evaluate_retrieval(results, relevant_docs, retrieval_top_k)
+            logger.info(f"  Retrieval - Precision@{retrieval_top_k}: {ret_scores['precision_at_k']:.4f}")
+            sub_query_metrics["retrieval"] = ret_scores
+            overall_retrieval_scores.append(ret_scores['precision_at_k'])
         else:
             logger.info("  Retrieval - No results to evaluate")
-            sub_query_metrics["retrieval"] = {"precision_at_k": 0.0} # Indicate no results
+            sub_query_metrics["retrieval"] = {"precision_at_k": 0.0}
 
         # Generation Evaluation
-        contexts = [result['text'] for result in results] if results else []
-
-        if answer and contexts:
-            generation_scores = evaluator.evaluate_generation(sub_q, answer, contexts)
-            logger.info(f"  Generation - Relevance: {generation_scores['relevance']:.4f}")
-            logger.info(f"  Generation - Groundedness: {generation_scores['groundedness']:.4f}")
-            logger.info(f"  Generation - Faithfulness: {generation_scores['faithfulness']:.4f}")
-            sub_query_metrics["generation"] = generation_scores
-            overall_generation_scores.append(generation_scores)
+        sub_contexts = [res['text'] for res in results]
+        if answer and sub_contexts:
+            gen_scores = metrics_engine.evaluate_generation(sub_q, answer, sub_contexts)
+            logger.info(f"  Generation - Relevance: {gen_scores['relevance']:.4f}")
+            logger.info(f"  Generation - Groundedness: {gen_scores['groundedness']:.4f}")
+            logger.info(f"  Generation - Faithfulness: {gen_scores['faithfulness']:.4f}")
+            sub_query_metrics["generation"] = gen_scores
+            overall_generation_scores.append(gen_scores)
         else:
             logger.info("  Generation - No answer or contexts to evaluate")
-            sub_query_metrics["generation"] = {"relevance": 0.0, "groundedness": 0.0, "faithfulness": 0.0} # Indicate no results
+            sub_query_metrics["generation"] = {"relevance": 0.0, "groundedness": 0.0, "faithfulness": 0.0}
 
         all_metrics_data["sub_queries"].append(sub_query_metrics)
 
-    # Overall Scores
-    overall_retrieval_summary = {}
-    overall_generation_summary = {}
-
-    if overall_retrieval_scores:
-        avg_precision = np.mean(overall_retrieval_scores)
-        logger.info(f"Overall Retrieval - Average Precision@{retrieval_top_k}: {avg_precision:.4f}")
-
+    # Overall Summary
+    avg_precision = np.mean(overall_retrieval_scores) if overall_retrieval_scores else 0.0
+    all_metrics_data["overall_retrieval_scores"] = {"average_precision_at_k": avg_precision}
+    logger.info(f"Overall Retrieval - Average Precision@{retrieval_top_k}: {avg_precision:.4f}")
+    
     if overall_generation_scores:
         avg_relevance = np.mean([s['relevance'] for s in overall_generation_scores])
         avg_groundedness = np.mean([s['groundedness'] for s in overall_generation_scores])
@@ -267,15 +329,15 @@ def main():
         logger.info(f"Overall Generation - Average Groundedness: {avg_groundedness:.4f}")
         logger.info(f"Overall Generation - Average Faithfulness: {avg_faithfulness:.4f}")
 
-        overall_retrieval_summary = {"average_precision_at_k": avg_precision}
-        overall_generation_summary = {
+        all_metrics_data["overall_generation_scores"] = {
             "average_relevance": avg_relevance,
             "average_groundedness": avg_groundedness,
             "average_faithfulness": avg_faithfulness
         }
-
-    all_metrics_data["overall_retrieval_scores"] = overall_retrieval_summary
-    all_metrics_data["overall_generation_scores"] = overall_generation_summary
+    else:
+        all_metrics_data["overall_generation_scores"] = {
+            "average_relevance": 0.0, "average_groundedness": 0.0, "average_faithfulness": 0.0
+        }
 
     # Save all metrics to a JSON file
     metrics_output_file = os.path.join(output_path, "rag_metrics.json")

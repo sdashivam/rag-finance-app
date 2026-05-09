@@ -1,27 +1,3 @@
-"""
-parsing.py
-----------
-A reusable module for extracting text, tables, and metadata from PDF files.
-
-Dependencies:
-    pip install pdfplumber pypdf
-
-Usage:
-    from parsing import PDFParser
-
-    parser = PDFParser("FY25_financial_statements.pdf")
-    result = parser.parse()
-
-    result["metadata"]          # dict of PDF metadata
-    result["text"]              # list of {page, content} dicts
-    result["tables"]            # list of {page, table_index, headers, rows} dicts
-
-    # Or use individual methods:
-    parser.extract_metadata()
-    parser.extract_text(page_range=(1, 10))
-    parser.extract_tables(page_range=(1, 50))
-"""
-
 from __future__ import annotations
 
 import re
@@ -304,49 +280,3 @@ class PDFParser:
                     cleaned_row.append(cell_str)
             cleaned.append(cleaned_row)
         return cleaned
-
-
-# ---------------------------------------------------------------------------
-# CLI / quick demo
-# ---------------------------------------------------------------------------
-
-def _demo(pdf_path: str) -> None:
-    """Quick command-line demo: print summary of extracted content."""
-    import json
-
-    pdf_path = r"D:\ML_ineuron_course\FinChatQA\rag-finance-app\input\FY25_financial_statements.pdf"
-
-    parser = PDFParser(pdf_path)
-
-    print("=" * 60)
-    print("METADATA")
-    print("=" * 60)
-    meta = parser.extract_metadata()
-    print(json.dumps(meta.to_dict(), indent=2))
-
-    print("\n" + "=" * 60)
-    print("TEXT EXTRACTION  (first 3 pages)")
-    print("=" * 60)
-    texts = parser.extract_text(page_range=(1, 3))
-    for pt in texts:
-        print(f"\n--- Page {pt.page} ---")
-        print(pt.content[:500], "..." if len(pt.content) > 500 else "")
-
-    print("\n" + "=" * 60)
-    print("TABLE EXTRACTION  (first 30 pages)")
-    print("=" * 60)
-    tables = parser.extract_tables(page_range=(1, 30))
-    print(f"Total tables found: {len(tables)}")
-    for tbl in tables[:3]:          # show first 3 tables only
-        print(f"\n[Page {tbl.page}, Table #{tbl.table_index}]")
-        print("Headers:", tbl.headers)
-        for row in tbl.rows[:4]:    # show first 4 rows
-            print(" ", row)
-        if len(tbl.rows) > 4:
-            print(f"  ... ({len(tbl.rows)} rows total)")
-
-
-if __name__ == "__main__":
-    import sys
-    path = sys.argv[1] if len(sys.argv) > 1 else "FY25_financial_statements.pdf"
-    _demo(path)

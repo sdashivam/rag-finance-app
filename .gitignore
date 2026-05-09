@@ -11,15 +11,16 @@ env/
 
 # Artifacts and Data
 # Ignore the output directory and its contents (FAISS index, metadata, etc.)
-output/
 data/
 
 # Databases
 *.db
 *.sqlite
+*.faiss
+*.pkl
 
 # Metrics and Logs
-rag_metrics.json
+*.json
 *.log
 
 # FAISS Index files (if stored outside output/)

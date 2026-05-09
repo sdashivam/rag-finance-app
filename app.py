@@ -3,6 +3,12 @@ import yaml
 import os
 import sys
 
+# """
+# Streamlit application for the Financial Report RAG QA System.
+# This app provides a user interface to interact with the RAG pipeline, submit queries,
+# and provide feedback on the generated answers.
+# """
+
 # Add project root to path to resolve src imports correctly
 root_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(root_dir)
@@ -13,6 +19,10 @@ from src.evaluation.feedback import FeedbackManager
 from langchain_ollama import ChatOllama
 
 def load_config():
+    """
+    Loads the configuration from the config.yaml file.
+    Returns: dict: The loaded configuration.
+    """
     config_path = os.path.join(root_dir, 'config.yaml')
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
@@ -60,6 +70,9 @@ def initialize_rag(_config):
     )
 
 def main():
+    """
+    Main function to run the Streamlit application.
+    """
     st.set_page_config(page_title="FinChat RAG", page_icon="📉", layout="wide")
     st.title("📊 Financial Report RAG System")
     

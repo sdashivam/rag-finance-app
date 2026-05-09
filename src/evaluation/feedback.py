@@ -10,6 +10,12 @@ class FeedbackManager:
     and capturing user evaluations.
     """
     def __init__(self, db_path: str):
+        """
+        Initializes the FeedbackManager with a path to the SQLite database.
+
+        Args:
+            db_path (str): The file system path where the SQLite database is (or will be) stored.
+        """
         self.db_path = db_path
         self._init_db()
 
