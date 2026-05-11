@@ -1,7 +1,7 @@
 import re
 import pickle
 import numpy as np
-import faiss
+import faiss, torch
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -30,6 +30,7 @@ class SectionAwareChunker:
         """
         chunks = []
         file_path = parsed_data["metadata"]["file_path"]
+        
 
         # 1. Process Text Sections
         for item in parsed_data["text"]:
@@ -84,7 +85,9 @@ class FAISSIndexManager:
     Handles embedding generation and FAISS indexing.
     """
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self.model = SentenceTransformer(model_name)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = SentenceTransformer(model_name,
+                                         device=device)
         self.index = None
         self.metadata = []
 
@@ -97,14 +100,42 @@ class FAISSIndexManager:
             The index is built using L2 distance (IndexFlatL2) for efficient similarity search.
             The embeddings are converted to float32 before being added to the index, as required by FAISS.
         """
-        self.metadata = [{"text": c["text"], "metadata": c["metadata"]} for c in chunks]
+        self.metadata = []
+        for chunk in chunks:
+            text = str(chunk.get("text", "")).strip()
+            if not text:
+                continue
+            self.metadata.append({
+                "text": text,
+                "metadata": chunk.get("metadata", {}) or {},
+            })
+
+        if not self.metadata:
+            raise ValueError("No non-empty chunks were produced; refusing to build an empty FAISS index.")
+
         texts = [item["text"] for item in self.metadata]
         
         print(f"Generating embeddings for {len(texts)} chunks...")
-        embeddings = self.model.encode(texts, convert_to_numpy=True)
+        try:
+            embeddings = self.model.encode(
+                texts,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+        except TypeError:
+            embeddings = self.model.encode(texts, convert_to_numpy=True)
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            embeddings = embeddings / np.clip(norms, a_min=1e-12, a_max=None)
+
+        if embeddings.ndim != 2 or embeddings.shape[0] != len(texts):
+            raise ValueError(
+                f"Unexpected embedding shape {embeddings.shape}; expected ({len(texts)}, dimension)."
+            )
+        if not np.isfinite(embeddings).all():
+            raise ValueError("Embedding matrix contains NaN or infinite values.")
         
         dimension = embeddings.shape[1]
-        self.index = faiss.IndexFlatL2(dimension)
+        self.index = faiss.IndexFlatIP(dimension)
         self.index.add(embeddings.astype("float32"))
         print("FAISS index built successfully.")
 
@@ -116,6 +147,9 @@ class FAISSIndexManager:
                 The index is saved using the faiss.write_index function, and the metadata is saved using pickle.dump.
                 A confirmation message is printed upon successful saving of the index and metadata.
         """
+        if self.index is None or not self.metadata:
+            raise ValueError("Cannot save FAISS artifacts before building a non-empty index.")
+
         path = Path(output_path)
         path.mkdir(parents=True, exist_ok=True)
         
@@ -123,3 +157,80 @@ class FAISSIndexManager:
         with open(path / metadata_filename, "wb") as f:
             pickle.dump(self.metadata, f)
         print(f"Index and metadata saved to {output_path}")
+
+    @staticmethod
+    def inspect_saved(
+        output_path: str,
+        index_filename: str = "index.faiss",
+        metadata_filename: str = "metadata.pkl",
+    ) -> dict:
+        """
+        Returns a validation report for persisted FAISS artifacts.
+        This is intentionally lightweight so benchmark/main can decide whether
+        to reuse an existing index or rebuild it.
+        """
+        path = Path(output_path)
+        index_path = path / index_filename
+        metadata_path = path / metadata_filename
+        report = {
+            "index_path": str(index_path),
+            "metadata_path": str(metadata_path),
+            "index_exists": index_path.exists(),
+            "metadata_exists": metadata_path.exists(),
+            "valid": False,
+            "errors": [],
+            "faiss_ntotal": 0,
+            "faiss_dimension": 0,
+            "metadata_count": 0,
+            "non_empty_text_count": 0,
+            "metadata_with_fields_count": 0,
+        }
+
+        if not report["index_exists"]:
+            report["errors"].append("FAISS index file is missing.")
+        if not report["metadata_exists"]:
+            report["errors"].append("FAISS metadata file is missing.")
+        if report["errors"]:
+            return report
+
+        try:
+            index = faiss.read_index(str(index_path))
+            report["faiss_ntotal"] = int(index.ntotal)
+            report["faiss_dimension"] = int(index.d)
+        except Exception as exc:
+            report["errors"].append(f"Could not read FAISS index: {exc}")
+            return report
+
+        try:
+            with open(metadata_path, "rb") as f:
+                metadata = pickle.load(f)
+        except Exception as exc:
+            report["errors"].append(f"Could not read metadata pickle: {exc}")
+            return report
+
+        if not isinstance(metadata, list):
+            report["errors"].append(f"Metadata must be a list, got {type(metadata).__name__}.")
+            return report
+
+        report["metadata_count"] = len(metadata)
+        report["non_empty_text_count"] = sum(
+            1 for item in metadata
+            if isinstance(item, dict) and str(item.get("text", "")).strip()
+        )
+        report["metadata_with_fields_count"] = sum(
+            1 for item in metadata
+            if isinstance(item, dict) and isinstance(item.get("metadata"), dict) and item["metadata"]
+        )
+
+        if report["faiss_ntotal"] != report["metadata_count"]:
+            report["errors"].append(
+                f"FAISS vectors ({report['faiss_ntotal']}) do not match metadata rows "
+                f"({report['metadata_count']})."
+            )
+        if report["faiss_ntotal"] <= 0:
+            report["errors"].append("FAISS index has no vectors.")
+        if report["non_empty_text_count"] <= 0:
+            report["errors"].append("Metadata contains no non-empty chunk text.")
+
+        report["valid"] = not report["errors"]
+        return report

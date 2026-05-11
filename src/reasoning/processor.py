@@ -25,8 +25,8 @@ class QueryProcessor:
         # 2. Financial Term Expansion (e.g., FY25 -> Fiscal Year 2025)
         # This aligns the query language with the formal language usually found in PDFs
         replacements = {
-            r'\bFY(\d{2})\b': r'Fiscal Year 20\1',
-            r'\bFY(\d{4})\b': r'Fiscal Year \1',
+            r'\bFY(\d{4})\b': r'FY\1 year ended March 31 \1',
+            r'\bFY(\d{2})\b': r'FY20\1 year ended March 31 20\1',
             r'\bYoY\b': 'Year-over-Year',
             r'\bQ([1-4])\b': r'Quarter \1',
             r'\bEPS\b': 'Earnings Per Share',
@@ -64,6 +64,9 @@ class QueryProcessor:
             "✓ Includes the company name when mentioned\n"
             "✓ Is independent and retrievable\n\n"
             
+            "Do not invent placeholder company names like XYZ Company, [Company Name], or [Bank Name]. "
+            "If the original query does not name a company, omit the company name.\n\n"
+
             "STEP 3 - OUTPUT: Provide ONLY the final list of sub-queries, one per line.\n"
             "Format each as a natural question. Do NOT use bullet points or numbering.\n\n"
             
@@ -114,11 +117,31 @@ class QueryProcessor:
                 if not line:
                     continue
                 # Remove common formatting artifacts
-                line = line.lstrip('- •*123456789. ')
+                line = re.sub(r"^\s*[-*•]?\s*\d*[\).\s-]*", "", line).strip()
                 line = line.strip()
-                
+                lower_line = line.lower()
+
+                artifact_prefixes = (
+                    "output:", "input:", "example", "here are", "note:",
+                    "since ", "assuming ", "if ", "let me", "i'll ", "i will ",
+                )
+                placeholder_fragments = (
+                    "[company", "[bank", "[specific", "[insert", "xyz company",
+                    "company name", "bank name", "specific company", "specific sector",
+                    "insert metric",
+                )
+                if lower_line.startswith(artifact_prefixes):
+                    continue
+                if any(fragment in lower_line for fragment in placeholder_fragments):
+                    continue
+                if not line.endswith("?"):
+                    if lower_line.startswith(("what", "how", "which", "why", "when", "where")):
+                        line += "?"
+                    else:
+                        continue
+
                 # Ensure it's a meaningful query (at least some minimum length)
-                if len(line) > 10 and not line.lower().startswith(('output:', 'input:', 'example')):
+                if len(line) > 10:
                     sub_queries.append(line)
             
             # If we got meaningful sub-queries, return them

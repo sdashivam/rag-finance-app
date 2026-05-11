@@ -11,7 +11,8 @@ from src.ingestion.indexing import SectionAwareChunker, FAISSIndexManager
 from src.reasoning.processor import QueryProcessor
 from src.reasoning.retrieval import (FAISSRetriever, BM25Retriever, SQLiteRetriever, HybridRetriever, AnswerAggregator)
 from src.evaluation.feedback import FeedbackManager
-from src.evaluation.metrics import RAGMetrics
+from src.evaluation.runtime_metrics import RuntimeMetrics
+from src.evaluation.retrieval_metrics import RetrievalMetrics
 
 
 """
@@ -84,13 +85,19 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
-    # Check if index and metadata already exist
-    index_exists = os.path.exists(os.path.join(output_path, output_file_name))
-    metadata_exists = os.path.exists(os.path.join(output_path, metadata_file_name))
+    # Check whether the persisted index is present and usable.
+    index_report = FAISSIndexManager.inspect_saved(output_path, output_file_name, metadata_file_name)
 
-    if index_exists and metadata_exists:
-        logger.info(f"Existing index and metadata found in {output_path}. Skipping parsing and indexing.")
+    if index_report["valid"]:
+        logger.info(
+            "Existing FAISS artifacts are valid. vectors=%s metadata=%s non_empty_text=%s",
+            index_report["faiss_ntotal"],
+            index_report["metadata_count"],
+            index_report["non_empty_text_count"],
+        )
     else:
+        logger.warning("FAISS artifacts are missing or invalid: %s", index_report["errors"])
+        logger.info("Rebuilding parsing, chunking, and FAISS artifacts.")
         # 1. Parsing
         logger.info(f"Parsing document: {input_file}")
         parser = PDFParser(input_file)
@@ -140,10 +147,11 @@ def main():
     
     # Pass the initialized LLM to the QueryProcessor
     query_processor = QueryProcessor(llm=llm_model)
-    metrics_engine = RAGMetrics()
+    runtime_engine = RuntimeMetrics()
+    retrieval_engine = RetrievalMetrics()
 
     # Capture Hardware Metrics
-    hw_metrics = metrics_engine.get_hardware_metrics()
+    hw_metrics = runtime_engine.get_hardware_metrics()
     logger.info(f"Hardware Stats - GPU Utilization: {hw_metrics['gpu_utilization_pct']}%, VRAM Usage: {hw_metrics['vram_usage_mb']:.2f} MB")
 
     sample_query = config.get("sample_query", "")
@@ -201,16 +209,16 @@ def main():
     # Measure Retrieval Phase (includes embedding generation)
     retrieval_start_time = time.perf_counter()
     retrieval_results = hybrid_retriever.retrieve_for_queries(processed_queries)
-    embedding_latency = metrics_engine.measure_duration(retrieval_start_time)
+    embedding_latency = runtime_engine.measure_duration(retrieval_start_time)
     logger.info(f"Embedding/Retrieval Latency: {embedding_latency:.4f}s")
 
     # Measure Aggregation/Generation phase
     gen_start_time = time.perf_counter()
     answer_aggregator = AnswerAggregator(llm=llm_model)
     aggregated_answers = answer_aggregator.aggregate_all(processed_queries, retrieval_results)
-    gen_duration = metrics_engine.measure_duration(gen_start_time)
+    gen_duration = runtime_engine.measure_duration(gen_start_time)
     
-    e2e_response_time = metrics_engine.measure_duration(e2e_start_time)
+    e2e_response_time = runtime_engine.measure_duration(e2e_start_time)
     logger.info(f"End-to-End Response Time: {e2e_response_time:.4f}s")
     
     # Initialize FeedbackManager for logging evaluation runs
@@ -235,7 +243,7 @@ def main():
         logger.info("  Aggregated Answer:")
         logger.info(f"    {aggregated_answers.get(sub_q, 'No answer generated.')}")
 
-    token_speed = metrics_engine.calculate_token_speed(final_answer, gen_duration)
+    token_speed = runtime_engine.calculate_token_speed(final_answer, gen_duration)
     logger.info(f"Token Generation Speed: {token_speed:.2f} tokens/sec")
 
     # Log the overall session to the feedback database for future trend analysis
@@ -270,10 +278,10 @@ def main():
     }
 
     # Calculate RAGAS Quality Metrics (Faithfulness, Relevancy, Precision, Recall)
-    all_contexts = [ctx['text'] for q_res in retrieval_results.values() for ctx in q_res]
+    all_contexts = [ctx['text'] for q_res in retrieval_results.values() for ctx in q_res if ctx.get("text")]
     
     logger.info("Calculating RAGAS quality scores...")
-    quality_scores = metrics_engine.get_quality_scores(
+    quality_scores = retrieval_engine.get_quality_scores(
         query=sample_query,
         answer=final_answer,
         contexts=all_contexts,
@@ -299,7 +307,7 @@ def main():
         # Retrieval Evaluation
         results = retrieval_results.get(sub_q, [])
         if results:
-            ret_scores = metrics_engine.evaluate_retrieval(results, relevant_docs, retrieval_top_k)
+            ret_scores = retrieval_engine.evaluate_retrieval(results, relevant_docs, retrieval_top_k)
             logger.info(f"  Retrieval - Precision@{retrieval_top_k}: {ret_scores['precision_at_k']:.4f}")
             sub_query_metrics["retrieval"] = ret_scores
             overall_retrieval_scores.append(ret_scores['precision_at_k'])
@@ -310,7 +318,7 @@ def main():
         # Generation Evaluation
         sub_contexts = [res['text'] for res in results]
         if answer and sub_contexts:
-            gen_scores = metrics_engine.evaluate_generation(sub_q, answer, sub_contexts)
+            gen_scores = retrieval_engine.evaluate_generation(sub_q, answer, sub_contexts)
             logger.info(f"  Generation - Relevance: {gen_scores['relevance']:.4f}")
             logger.info(f"  Generation - Groundedness: {gen_scores['groundedness']:.4f}")
             logger.info(f"  Generation - Faithfulness: {gen_scores['faithfulness']:.4f}")

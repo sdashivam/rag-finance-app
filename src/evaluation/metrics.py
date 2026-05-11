@@ -7,7 +7,7 @@ try:
     from ragas import evaluate
     from ragas.metrics import (
         faithfulness,
-        answer_relevance,
+        answer_relevancy,
         context_precision,
         context_recall,
     )
@@ -78,31 +78,17 @@ class RAGMetrics:
             "context_recall": 0.0
         }
 
-        if not HAS_RAGAS:
-            return default_scores
-
         try:
-            data = {
-                "question": [query],
-                "answer": [answer],
-                "contexts": [contexts],
-                "ground_truth": [ground_truth if ground_truth else ""]
-            }
-            dataset = Dataset.from_dict(data)
+            from src.evaluation.retrieval_metrics import RetrievalMetrics
 
-            results = evaluate(
-                dataset=dataset,
-                metrics=[faithfulness, answer_relevance, context_precision, context_recall],
+            return RetrievalMetrics().get_quality_scores(
+                query=query,
+                answer=answer,
+                contexts=contexts,
                 llm=llm,
-                embeddings=embeddings
+                embeddings=embeddings,
+                ground_truth=ground_truth,
             )
-
-            return {
-                "faithfulness": float(results.get("faithfulness", 0.0)),
-                "answer_relevancy": float(results.get("answer_relevance", 0.0)),
-                "context_precision": float(results.get("context_precision", 0.0)),
-                "context_recall": float(results.get("context_recall", 0.0)),
-            }
         except Exception as e:
             logger.warning(f"Error calculating RAGAS quality scores: {e}")
             return default_scores

@@ -27,11 +27,16 @@ class SQLiteManager:
 
     def insert_tables(self, file_path: str, tables: list):
         """Inserts list of table dictionaries into the database."""
+        normalized_source = os.path.abspath(file_path)
         with self.conn:
+            self.conn.execute(
+                "DELETE FROM financial_tables WHERE file_source IN (?, ?)",
+                (file_path, normalized_source),
+            )
             for table in tables:
                 self.conn.execute(
                     "INSERT INTO financial_tables (file_source, page_number, table_data) VALUES (?, ?, ?)",
-                    (file_path, table["page"], json.dumps(table))
+                    (normalized_source, table["page"], json.dumps(table))
                 )
         print(f"Successfully stored {len(tables)} tables in SQLite.")
 
