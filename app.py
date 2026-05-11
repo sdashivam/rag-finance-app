@@ -1,13 +1,17 @@
+"""
+Streamlit web interface for Financial Report RAG QA System.
+
+Provides interactive UI for:
+- Submitting financial queries against parsed PDF documents
+- Viewing sub-query decomposition and retrieval results
+- Providing binary feedback on answer quality
+- Logging interactions for feedback analysis
+"""
+
 import streamlit as st
 import yaml
 import os
 import sys
-
-# """
-# Streamlit application for the Financial Report RAG QA System.
-# This app provides a user interface to interact with the RAG pipeline, submit queries,
-# and provide feedback on the generated answers.
-# """
 
 # Add project root to path to resolve src imports correctly
 root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -18,23 +22,32 @@ from src.reasoning.retrieval import (FAISSRetriever, BM25Retriever, SQLiteRetrie
 from src.evaluation.feedback import FeedbackManager
 from langchain_ollama import ChatOllama
 
-def load_config():
-    """
-    Loads the configuration from the config.yaml file.
-    Returns: dict: The loaded configuration.
+def load_config() -> dict:
+    """Load configuration from config.yaml.
+
+    Returns:
+        Configuration dictionary with paths and model settings.
     """
     config_path = os.path.join(root_dir, 'config.yaml')
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
+
 @st.cache_resource
 def initialize_rag(_config):
-    """Initializes and caches the RAG components for the UI."""
+    """Initialize and cache RAG components for Streamlit session.
+
+    Args:
+        _config: Configuration dict from load_config().
+
+    Returns:
+        Tuple of (QueryProcessor, HybridRetriever, AnswerAggregator, FeedbackManager).
+    """
     # Resolve absolute paths
     output_path = _config['output_path']
     if not os.path.isabs(output_path):
         output_path = os.path.join(root_dir, output_path)
-        
+
     db_path = _config['db_path']
     if not os.path.isabs(db_path):
         db_path = os.path.join(root_dir, db_path)
@@ -44,41 +57,42 @@ def initialize_rag(_config):
         temperature=_config['llm_temperature'],
         base_url=_config['llm_base_url']
     )
-    
+
     faiss_retriever = FAISSRetriever(
         index_path=os.path.join(output_path, _config['output_file']),
         metadata_path=os.path.join(output_path, _config['metadata_file']),
         model_name=_config['retriever_model'],
-        top_k=_config['retrieval_top_k'],
+        top_k=_config.get('retrieval_top_k'),
+        config=_config,
     )
 
     bm25_retriever = BM25Retriever(
         corpus_metadata=faiss_retriever.metadata,
-        top_k=_config['retrieval_top_k'],
+        top_k=_config.get('retrieval_top_k'),
+        config=_config,
     )
-    
+
     sqlite_retriever = None
     if os.path.exists(db_path):
-        sqlite_retriever = SQLiteRetriever(db_path=db_path, top_k=_config['retrieval_top_k'])
+        sqlite_retriever = SQLiteRetriever(db_path=db_path, top_k=_config.get('retrieval_top_k'), config=_config)
 
     hybrid_retriever = HybridRetriever(
         faiss_retriever=faiss_retriever,
         bm25_retriever=bm25_retriever,
         sqlite_retriever=sqlite_retriever,
-        top_k=_config['retrieval_top_k'],
+        top_k=_config.get('retrieval_top_k'),
+        config=_config,
     )
-    
+
     return (
-        QueryProcessor(llm=llm),
+        QueryProcessor(llm=llm, config=_config),
         hybrid_retriever,
         AnswerAggregator(llm=llm),
         FeedbackManager(db_path=db_path)
     )
 
 def main():
-    """
-    Main function to run the Streamlit application.
-    """
+    """Run Streamlit application for interactive RAG querying."""
     st.set_page_config(page_title="FinChat RAG", page_icon="📉", layout="wide")
     st.title("📊 Financial Report RAG System")
     

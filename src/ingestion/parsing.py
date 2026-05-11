@@ -1,3 +1,10 @@
+"""
+PDF parsing and text/table extraction.
+
+Handles extraction of text content, tables, and metadata from financial PDF reports.
+Supports page offset application for PDFs without visible page labels.
+"""
+
 from __future__ import annotations
 
 import re
@@ -16,23 +23,28 @@ from pypdf import PdfReader
 @dataclass
 class PageText:
     """Extracted text for a single PDF page."""
-    page: int
-    content: str
+    page: int                          # 0-based internal page index (for FAISS/BM25)
+    pdf_page: int | None = None       # Visible PDF page number (from page labels)
+    content: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        # Remove None values for cleaner output
+        return {k: v for k, v in result.items() if v is not None}
 
 
 @dataclass
 class PageTable:
     """Extracted table for a single PDF page."""
-    page: int
-    table_index: int        # 0-based index when multiple tables appear on one page
-    headers: list[str]
-    rows: list[list[str]]
+    page: int                          # 0-based internal page index (for FAISS/BM25)
+    pdf_page: int | None = None       # Visible PDF page number (from page labels)
+    table_index: int = 0              # 0-based index when multiple tables appear on one page
+    headers: list[str] = field(default_factory=list)
+    rows: list[list[str]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        return {k: v for k, v in result.items() if v is not None}
 
 
 @dataclass
@@ -161,14 +173,20 @@ class PDFParser:
 
         with pdfplumber.open(self.pdf_path) as pdf:
             pages = self._select_pages(pdf.pages, page_range)
-            for page_obj in pages:
+            for idx, page_obj in enumerate(pages):
                 raw = page_obj.extract_text() or ""
                 if strip_whitespace:
                     raw = re.sub(r"\n{3,}", "\n\n", raw)   # collapse multiple blank lines
                     raw = raw.strip()
                 if skip_empty and not raw:
                     continue
-                results.append(PageText(page=page_obj.page_number, content=raw))
+                # page: 0-based internal index for FAISS/BM25
+                # pdf_page: visible PDF page label (e.g., 138 if PDF starts at page 138)
+                results.append(PageText(
+                    page=idx,
+                    pdf_page=page_obj.page_number,
+                    content=raw
+                ))
 
         return results
 
@@ -199,7 +217,7 @@ class PDFParser:
 
         with pdfplumber.open(self.pdf_path) as pdf:
             pages = self._select_pages(pdf.pages, page_range)
-            for page_obj in pages:
+            for idx, page_obj in enumerate(pages):
                 raw_tables = page_obj.extract_tables() or []
                 for t_idx, raw_table in enumerate(raw_tables):
                     if not raw_table:
@@ -215,7 +233,8 @@ class PDFParser:
                         rows = cleaned
 
                     results.append(PageTable(
-                        page=page_obj.page_number,
+                        page=idx,
+                        pdf_page=page_obj.page_number,
                         table_index=t_idx,
                         headers=headers,
                         rows=rows,
@@ -246,6 +265,41 @@ class PDFParser:
             "text":     [t.to_dict() for t in text],
             "tables":   [t.to_dict() for t in tables],
         }
+
+    @staticmethod
+    def apply_page_offset(parsed_data: dict, offset: int) -> dict:
+        """
+        Apply a page offset to parsed data when PDF doesn't have page labels.
+
+        This converts internal 0-based page indices to visible PDF page numbers.
+        Example: offset=138 means internal page 0 becomes visible page 138.
+
+        Parameters
+        ----------
+        parsed_data : dict
+            Output from parse()
+        offset : int
+            Offset to add to internal page indices to get visible page numbers
+
+        Returns
+        -------
+        dict
+            Modified parsed_data with pdf_page updated
+        """
+        if offset <= 0:
+            return parsed_data
+
+        # Apply to text pages
+        for item in parsed_data.get("text", []):
+            internal_page = item.get("page", 0)
+            item["pdf_page"] = internal_page + offset
+
+        # Apply to tables
+        for item in parsed_data.get("tables", []):
+            internal_page = item.get("page", 0)
+            item["pdf_page"] = internal_page + offset
+
+        return parsed_data
 
     # ------------------------------------------------------------------
     # Helpers

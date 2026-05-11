@@ -17,23 +17,24 @@ from src.evaluation.retrieval_metrics import RetrievalMetrics
 
 """
 Main script for the Financial Report RAG QA System.
-This script orchestrates the entire RAG pipeline, including data ingestion, indexing,
-query processing, retrieval, answer aggregation, and evaluation.
+
+Orchestrates the complete RAG pipeline:
+1. Configuration loading
+2. PDF parsing and table extraction
+3. SQLite storage for structured data
+4. Section-aware chunking and FAISS indexing
+5. Query preprocessing and decomposition
+6. Hybrid retrieval (FAISS + BM25 + SQLite)
+7. LLM-based answer aggregation
+8. Quality metrics evaluation
+9. Results logging to JSON
+
+Usage:
+    python main.py
 """
 
 def main():
-    """
-    Executes the end-to-end RAG pipeline.
-    This includes:
-    1. Loading configuration.
-    2. Parsing PDF documents and storing structured data in SQLite.
-    3. Chunking documents and building a FAISS index for semantic retrieval.
-    4. Processing a sample query through query decomposition, hybrid retrieval,
-       and answer aggregation.
-    5. Logging the interaction for feedback.
-    6. Evaluating the retrieval and generation quality using RAGAS metrics.
-    7. Saving evaluation metrics to a JSON file.
-    """
+    """Execute end-to-end RAG pipeline with logging and evaluation."""
     # Get the directory where main.py is located to resolve paths reliably
     base_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(base_dir, 'config.yaml')
@@ -112,7 +113,7 @@ def main():
 
         # 2. Chunking & Indexing
         logger.info(f"Section-aware Chunking document and building FAISS index.")
-        chunker = SectionAwareChunker()
+        chunker = SectionAwareChunker(config=config)
         chunks = chunker.chunk(parsed_data)
 
         embedding_model = config.get("embedding_model")
@@ -120,7 +121,7 @@ def main():
             raise ValueError("embedding_model must be set in config.yaml.")
 
         logger.info(f"Saving Semantic Retrival to FAISS index :{output_file_name}")
-        indexer = FAISSIndexManager(model_name=embedding_model)
+        indexer = FAISSIndexManager(config=config)
         indexer.build_index(chunks) # This builds the index in memory
         indexer.save(output_path, output_file_name, metadata_file_name) # This saves the index to disk
 
@@ -146,9 +147,9 @@ def main():
         llm_model = None
     
     # Pass the initialized LLM to the QueryProcessor
-    query_processor = QueryProcessor(llm=llm_model)
+    query_processor = QueryProcessor(llm=llm_model, config=config)
     runtime_engine = RuntimeMetrics()
-    retrieval_engine = RetrievalMetrics()
+    retrieval_engine = RetrievalMetrics(config=config)
 
     # Capture Hardware Metrics
     hw_metrics = runtime_engine.get_hardware_metrics()
@@ -185,17 +186,19 @@ def main():
         metadata_path=os.path.join(output_path, metadata_file_name),
         model_name=retriever_model,
         top_k=retrieval_top_k,
+        config=config,
     )
 
     bm25_retriever = BM25Retriever(
         corpus_metadata=faiss_retriever.metadata,
-        top_k=retrieval_top_k
+        top_k=retrieval_top_k,
+        config=config,
     )
 
     sqlite_retriever = None
     if os.path.exists(db_path):
         try:
-            sqlite_retriever = SQLiteRetriever(db_path=db_path, top_k=retrieval_top_k)
+            sqlite_retriever = SQLiteRetriever(db_path=db_path, top_k=retrieval_top_k, config=config)
         except Exception as e:
             logger.warning(f"SQLite retrieval disabled: {e}")
 
@@ -204,6 +207,7 @@ def main():
         bm25_retriever=bm25_retriever,
         sqlite_retriever=sqlite_retriever,
         top_k=retrieval_top_k,
+        config=config,
     )
 
     # Measure Retrieval Phase (includes embedding generation)

@@ -1,14 +1,57 @@
 input_path: "./input"
-input_file_name: "FY25_financial_statements.pdf"
+input_file_name: "WIPO_statement.pdf"
 output_path: "./output"
 output_file: "index.faiss"
 metadata_file: "metadata.pkl"
 db_path: "./output/financial_data.db"
+
+# LLM Configuration
 llm_model: "llama3"
 llm_temperature: 0.1
 llm_base_url: "http://localhost:11434"
+
+# Embedding Models
 embedding_model: "all-MiniLM-L6-v2"
 retriever_model: "all-MiniLM-L6-v2"
+evaluation_model: "all-MiniLM-L6-v2"
+
+# Retrieval Configuration
 retrieval_top_k: 3
+search_k_multiplier: 10
+sql_keywords_limit: 6
+device: "auto"  # "auto" (cuda if available), "cuda", or "cpu"
+
+# Chunking Configuration
+chunk_size: 1000
+chunk_overlap: 200
+
+# Query Decomposition
+decomposition_similarity_threshold: 0.75
+
+# SQL Retrieval Stop Words
+sql_stop_words:
+  - what
+  - why
+  - how
+  - is
+  - the
+  - for
+  - and
+  - from
+  - to
+  - in
+  - of
+  - a
+  - an
+  - on
+  - with
+  - by
+  - year
+  - fy
+  - q
+
+# Page offset: visible_page = internal_page + page_offset
+# If your PDF's visible page numbers start at 138, set page_offset: 138
+page_offset: 138
 sample_query: >-
-  total borrowing in india as of 31 March 2025?
+  Total net assets - actuarial gains/(losses) excluded as at December 31, 2020?

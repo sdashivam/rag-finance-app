@@ -1,29 +1,52 @@
+"""
+Query preprocessing and decomposition for financial RAG pipeline.
+
+Handles query normalization, financial term expansion, and LLM-driven
+decomposition of complex multi-part questions into atomic sub-queries.
+"""
+
 import re
 from typing import List
 
+
 class QueryProcessor:
+    """Normalizes and decomposes user queries for multi-stage retrieval.
+
+    Responsibilities:
+    - Clean and normalize query text
+    - Expand financial abbreviations (FY25, YoY, EPS, etc.)
+    - Use LLM to decompose complex queries into atomic sub-queries
+    - Fallback to regex decomposition if LLM unavailable
+
+    Attributes:
+        llm: Optional LLM instance for decomposition (e.g., ChatOllama)
+        similarity_threshold: Threshold for detecting failed decomposition
+
+    Args:
+        llm: Optional LLM instance (e.g., ChatOllama).
+        config: Optional config dict with decomposition_similarity_threshold.
     """
-    Handles query cleaning, normalization, and decomposition into sub-queries.
-    This is the first stage of the Query Pipeline.
-    """
-    def __init__(self, llm=None):
-        """
-        Initialize with an optional LLM instance. 
-        Decomposition requires an LLM; if None, it returns the preprocessed query as a single item.
-        """
+    def __init__(self, llm=None, config: dict = None):
+        """Initialize QueryProcessor with optional LLM and config."""
         self.llm = llm
+        self.similarity_threshold = 0.75
+        if config:
+            self.similarity_threshold = config.get('decomposition_similarity_threshold', self.similarity_threshold)
 
     def preprocess(self, query: str) -> str:
+        """Normalize query and expand financial abbreviations.
+
+        Args:
+            query: Raw user query string.
+
+        Returns:
+            Cleaned and expanded query string.
         """
-        Normalizes the user query and expands common financial abbreviations 
-        to improve semantic search matching against report text.
-        """
-        # 1. Basic text cleaning
+        # Basic text cleaning
         query = query.strip()
         query = re.sub(r'\s+', ' ', query)
-        
-        # 2. Financial Term Expansion (e.g., FY25 -> Fiscal Year 2025)
-        # This aligns the query language with the formal language usually found in PDFs
+
+        # Financial term expansion - aligns informal queries with formal PDF language
         replacements = {
             r'\bFY(\d{4})\b': r'FY\1 year ended March 31 \1',
             r'\bFY(\d{2})\b': r'FY20\1 year ended March 31 20\1',
@@ -32,20 +55,22 @@ class QueryProcessor:
             r'\bEPS\b': 'Earnings Per Share',
             r'\bCAGR\b': 'Compound Annual Growth Rate'
         }
-        
+
         for pattern, replacement in replacements.items():
             query = re.sub(pattern, replacement, query, flags=re.IGNORECASE)
-            
+
         return query
 
     def decompose(self, query: str) -> List[str]:
-        """
-        Uses a direct two-level LLM approach to split complex financial queries into standalone sub-queries.
-        Level 1: Identify query components (metrics, time periods, companies, comparisons)
-        Level 2: Generate atomic sub-queries for each component combination
+        """Split complex query into atomic sub-queries using LLM.
+
+        Args:
+            query: Preprocessed query string.
+
+        Returns:
+            List of atomic sub-queries suitable for independent retrieval.
         """
         if not self.llm:
-            # Fallback if no LLM is integrated yet
             return [query]
         
         # Combined prompt that extracts structure and generates sub-queries in one call
@@ -162,35 +187,38 @@ class QueryProcessor:
             return self._fallback_regex_decompose(query)
     
     def _is_single_query_similar_to_original(self, original: str, single_query: str) -> bool:
-        """
-        Check if the returned query is too similar to the original (not properly decomposed).
-        Uses Jaccard similarity heuristic on word sets.
+        """Check if decomposition failed (returned query too similar to original).
 
         Args:
-            original (str): The original user query.
-            single_query (str): The single sub-query returned by the LLM.
+            original: Original preprocessed query.
+            single_query: Single sub-query from LLM.
 
         Returns:
-            bool: True if similarity exceeds the threshold (0.75), indicating poor decomposition.
+            True if Jaccard similarity exceeds similarity_threshold.
         """
-        # Simple heuristic: if they share more than 80% of words, they're too similar
         original_words = set(original.lower().split())
         query_words = set(single_query.lower().split())
-        
+
         if not original_words or not query_words:
             return False
-            
+
         intersection = len(original_words & query_words)
         union = len(original_words | query_words)
         similarity = intersection / union if union > 0 else 0
-        
-        return similarity > 0.75
+
+        return similarity > self.similarity_threshold
     
     def _fallback_regex_decompose(self, query: str) -> List[str]:
-        """Fallback decomposition using regex patterns for common multi-part queries."""
+        """Fallback decomposition using regex when LLM is unavailable.
+
+        Args:
+            query: Preprocessed query string.
+
+        Returns:
+            List of sub-queries (or single-item list if splitting fails).
+        """
         sub_queries = []
-        
-        # Pattern 1: Handle "and" separated clauses that look like separate questions
+
         # Split by "?" and "and" while preserving context
         parts = re.split(r'\?\s+(?:and\s+)?(?:what\s+)', query, flags=re.IGNORECASE)
         
@@ -220,6 +248,15 @@ class QueryProcessor:
         return sub_queries
 
     def run(self, raw_query: str) -> List[str]:
-        """Executes the full preprocessing and decomposition pipeline."""
+        """Execute full preprocessing and decomposition pipeline.
+
+        Args:
+            raw_query: Raw user query from UI or CLI.
+
+        Returns:
+            List of decomposed sub-queries for retrieval.
+        """
+        clean_query = self.preprocess(raw_query)
+        return self.decompose(clean_query)
         clean_query = self.preprocess(raw_query)
         return self.decompose(clean_query)

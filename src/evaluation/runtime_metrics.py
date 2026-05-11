@@ -1,14 +1,38 @@
+"""
+Runtime performance monitoring for RAG pipeline.
+
+Tracks execution timing, hardware utilization, and token throughput
+for performance regression detection and capacity planning.
+"""
+
 import time
 import psutil
 import logging
 
 logger = logging.getLogger(__name__)
 
+
 class RuntimeMetrics:
-    """Handles hardware utilization monitoring and execution timing."""
+    """Captures execution timing and hardware utilization metrics for RAG pipeline.
+
+    Responsibilities:
+    - Measure query latency at pipeline stages
+    - Track CPU/RAM/GPU utilization
+    - Calculate token generation throughput
+
+    Attributes:
+        gpu_utilization_pct: Current GPU utilization percentage (0 if unavailable)
+        vram_usage_mb: Current VRAM consumption in megabytes
+        cpu_utilization_pct: Current CPU utilization percentage
+        ram_usage_mb: Current RAM usage in megabytes
+    """
 
     def get_hardware_metrics(self) -> dict:
-        """Captures current CPU, RAM, and GPU utilization."""
+        """Capture current CPU, RAM, and GPU utilization.
+
+        Returns:
+            Dict with gpu_utilization_pct, vram_usage_mb, cpu_utilization_pct, ram_usage_mb.
+        """
         metrics = {
             "gpu_utilization_pct": 0,
             "vram_usage_mb": 0.0,
@@ -20,11 +44,26 @@ class RuntimeMetrics:
         return metrics
 
     def measure_duration(self, start_time: float) -> float:
-        """Calculates duration in seconds from a perf_counter start time."""
+        """Calculate elapsed time from perf_counter start timestamp.
+
+        Args:
+            start_time: Value from time.perf_counter().
+
+        Returns:
+            Duration in seconds.
+        """
         return time.perf_counter() - start_time
 
     def calculate_token_speed(self, text: str, duration: float) -> float:
-        """Calculates generation speed in tokens per second."""
+        """Calculate token generation throughput.
+
+        Args:
+            text: Generated response text.
+            duration: Generation time in seconds.
+
+        Returns:
+            Tokens per second (0 if duration <= 0).
+        """
         if duration <= 0:
             return 0.0
         tokens = len(text.split())

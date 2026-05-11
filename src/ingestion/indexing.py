@@ -1,3 +1,10 @@
+"""
+Document chunking and FAISS index management.
+
+Provides section-aware text chunking with metadata preservation
+and FAISS vector index construction for semantic retrieval.
+"""
+
 import re
 import pickle
 import numpy as np
@@ -6,11 +13,26 @@ from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+
 class SectionAwareChunker:
+    """Chunks text while preserving section context and metadata.
+
+    Splits documents into semantic units with attached metadata
+    for downstream retrieval and answer aggregation.
+
+    Attributes:
+        splitter: RecursiveCharacterTextSplitter configured for financial documents
+
+    Args:
+        config: Optional config dict with chunk_size and chunk_overlap.
+                Defaults: chunk_size=1000, chunk_overlap=200
     """
-    Chunks text while preserving section context and metadata.
-    """
-    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
+    def __init__(self, config: dict = None):
+        chunk_size = 1000
+        chunk_overlap = 200
+        if config:
+            chunk_size = config.get('chunk_size', chunk_size)
+            chunk_overlap = config.get('chunk_overlap', chunk_overlap)
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -34,60 +56,90 @@ class SectionAwareChunker:
 
         # 1. Process Text Sections
         for item in parsed_data["text"]:
-            page_num = item["page"]
+            page_num = item.get("page", 0)  # 0-based internal page index
+            pdf_page = item.get("pdf_page")  # Visible PDF page number (may be None)
             content = item["content"]
 
             # Heuristic for section detection: split by lines that look like headers
             # (e.g., "SECTION 1: BALANCE SHEET" or lines in ALL CAPS)
             parts = re.split(r'(\n[A-Z\s]{5,}\n)', content)
-            
+
             current_section = "General"
             for part in parts:
                 if re.match(r'\n[A-Z\s]{5,}\n', part):
                     current_section = part.strip()
                     continue
-                
+
                 if not part.strip():
                     continue
 
                 split_texts = self.splitter.split_text(part)
                 for text in split_texts:
+                    chunk_meta = {
+                        "source": file_path,
+                        "page": page_num,  # Internal 0-based index for FAISS/BM25
+                        "section": current_section,
+                        "type": "text"
+                    }
+                    # Add visible PDF page number if available
+                    if pdf_page is not None:
+                        chunk_meta["pdf_page"] = pdf_page
+
                     chunks.append({
                         "text": text,
-                        "metadata": {
-                            "source": file_path,
-                            "page": page_num,
-                            "section": current_section,
-                            "type": "text"
-                        }
+                        "metadata": chunk_meta
                     })
 
         # 2. Process Tables
         for table in parsed_data["tables"]:
+            page_num = table.get("page", 0)
+            pdf_page = table.get("pdf_page")
+
             header_str = " | ".join(table["headers"])
             rows_str = "\n".join([" | ".join(row) for row in table["rows"]])
-            table_content = f"Table (Page {table['page']}):\n{header_str}\n{'-' * len(header_str)}\n{rows_str}"
-            
+            # Use pdf_page for display if available, otherwise fallback to page
+            display_page = pdf_page if pdf_page is not None else page_num
+            table_content = f"Table (Page {display_page}):\n{header_str}\n{'-' * len(header_str)}\n{rows_str}"
+
+            chunk_meta = {
+                "source": file_path,
+                "page": page_num,  # Internal 0-based index
+                "section": "Table",
+                "type": "table"
+            }
+            if pdf_page is not None:
+                chunk_meta["pdf_page"] = pdf_page
+
             chunks.append({
                 "text": table_content,
-                "metadata": {
-                    "source": file_path,
-                    "page": table["page"],
-                    "section": "Table",
-                    "type": "table"
-                }
+                "metadata": chunk_meta
             })
 
         return chunks
 
 class FAISSIndexManager:
+    """Handles embedding generation and FAISS indexing.
+
+    Args:
+        config: Optional config dict with model_name and device settings.
+                device can be "auto" (cuda if available), "cuda", or "cpu".
     """
-    Handles embedding generation and FAISS indexing.
-    """
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = SentenceTransformer(model_name,
-                                         device=device)
+    def __init__(self, config: dict = None):
+        model_name = "all-MiniLM-L6-v2"
+        device = "cpu"
+
+        if config:
+            model_name = config.get('embedding_model', config.get('retriever_model', model_name))
+            device_setting = config.get('device', 'auto')
+
+            if device_setting == "auto":
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            elif device_setting in ("cuda", "cpu"):
+                device = device_setting
+            else:
+                device = "cpu"
+
+        self.model = SentenceTransformer(model_name, device=device)
         self.index = None
         self.metadata = []
 
@@ -233,4 +285,84 @@ class FAISSIndexManager:
             report["errors"].append("Metadata contains no non-empty chunk text.")
 
         report["valid"] = not report["errors"]
+        return report
+
+    @staticmethod
+    def debug_chunk_metadata(chunks: list[dict], sample_count: int = 5) -> dict:
+        """
+        Debug utility to inspect chunk metadata and validate page number consistency.
+
+        Parameters
+        ----------
+        chunks : list[dict]
+            List of chunk dictionaries with "text" and "metadata" keys
+        sample_count : int
+            Number of sample chunks to inspect
+
+        Returns
+        -------
+        dict
+            Debug report with page number statistics and any inconsistencies
+        """
+        if not chunks:
+            return {"error": "No chunks provided"}
+
+        report = {
+            "total_chunks": len(chunks),
+            "samples": [],
+            "page_stats": {"min": None, "max": None, "unique_values": set()},
+            "pdf_page_stats": {"min": None, "max": None, "has_values": False},
+            "inconsistencies": [],
+        }
+
+        internal_pages = set()
+        pdf_pages = set()
+
+        for i, chunk in enumerate(chunks[:sample_count]):
+            meta = chunk.get("metadata", {})
+            page = meta.get("page")
+            pdf_page = meta.get("pdf_page")
+
+            report["samples"].append({
+                "index": i,
+                "page": page,
+                "pdf_page": pdf_page,
+                "section": meta.get("section"),
+                "type": meta.get("type"),
+                "text_preview": chunk.get("text", "")[:100],
+            })
+
+            if page is not None:
+                internal_pages.add(page)
+            if pdf_page is not None:
+                pdf_pages.add(pdf_page)
+
+        # Calculate stats
+        if internal_pages:
+            report["page_stats"]["min"] = min(internal_pages)
+            report["page_stats"]["max"] = max(internal_pages)
+            report["page_stats"]["unique_values"] = len(internal_pages)
+
+        if pdf_pages:
+            report["pdf_page_stats"]["min"] = min(pdf_pages)
+            report["pdf_page_stats"]["max"] = max(pdf_pages)
+            report["pdf_page_stats"]["has_values"] = True
+
+        # Check for inconsistencies
+        for i, chunk in enumerate(chunks):
+            meta = chunk.get("metadata", {})
+            page = meta.get("page")
+            pdf_page = meta.get("pdf_page")
+
+            # If pdf_page is set, it should be different from page (unless offset is 0)
+            if page is not None and pdf_page is not None and page == pdf_page:
+                report["inconsistencies"].append(
+                    f"Chunk {i}: page={page} and pdf_page={pdf_page} are identical - "
+                    "possible that page_offset was not applied or PDF has no page labels"
+                )
+
+        # Convert set to list for JSON serialization
+        report["page_stats"]["unique_values"] = list(internal_pages)
+        report["inconsistencies"] = report["inconsistencies"][:10]  # Limit to first 10
+
         return report

@@ -1,14 +1,20 @@
+"""
+SQLite database connection testing and configuration utilities.
+
+Provides connection validation for the financial table storage layer.
+Used primarily for debugging and environment setup verification.
+"""
+
 import sqlite3
 import yaml
 import os
 
+
 def test_connection():
-    # Load config to get the db path
-    """
-    this module is responsible for establishing a connection 
-    to the SQLite database using the path specified in the config.yaml file. 
-    It reads the configuration, retrieves the database path, and attempts to connect to the database,
-    printing a success message if the connection is established or an error message if it fails.
+    """Validates database connectivity using config.yaml settings.
+
+    Reads db_path from configuration, attempts connection,
+    and reports success or failure status.
     """
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     config_path = os.path.join(base_dir, 'config.yaml')

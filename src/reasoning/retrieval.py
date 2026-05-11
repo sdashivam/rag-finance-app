@@ -1,3 +1,10 @@
+"""
+Multi-source retrieval and answer aggregation for RAG pipeline.
+
+Implements semantic (FAISS), lexical (BM25), and structured (SQLite) retrieval
+with hybrid merging and LLM-based answer synthesis.
+"""
+
 import json
 import pickle
 import re
@@ -6,34 +13,56 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import faiss
+import torch
 from sentence_transformers import SentenceTransformer
 
 
-class FAISSRetriever: 
-    """Loads a FAISS index and metadata to retrieve relevant chunks for a query."""
+class FAISSRetriever:
+    """Loads a FAISS index and metadata to retrieve relevant chunks for a query.
+
+    Responsibilities:
+    - Load persisted FAISS index and chunk metadata
+    - Generate query embeddings with GPU acceleration
+    - Execute similarity search with metadata filtering
+    - Return ranked results with source attribution
+    """
 
     def __init__(
         self,
         index_path: str,
         metadata_path: str,
         model_name: str,
-        top_k: int = 3,
+        top_k: int = None,
+        config: dict = None,
     ):
-        """
-        Initializes the FAISS retriever.
+        """Initialize FAISS retriever with optional config.
 
         Args:
-            index_path (str): Path to the saved .faiss index file.
-            metadata_path (str): Path to the pickled metadata file.
-            model_name (str): SentenceTransformer model name for embeddings.
-            top_k (int): Default number of documents to retrieve.
+            index_path: Path to saved .faiss index file.
+            metadata_path: Path to pickled metadata file.
+            model_name: SentenceTransformer model name for embeddings.
+            top_k: Default number of documents to retrieve.
+            config: Optional config dict with device, search_k_multiplier settings.
         """
         self.index_path = Path(index_path)
         self.metadata_path = Path(metadata_path)
-        self.model = SentenceTransformer(model_name)
+
+        # Device configuration
+        device = "cpu"
+        if config:
+            device_setting = config.get('device', 'auto')
+            if device_setting == "auto":
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            elif device_setting in ("cuda", "cpu"):
+                device = device_setting
+
+        self.model = SentenceTransformer(model_name, device=device)
         self.index = None
         self.metadata = []
+
+        # Retrieval settings from config or defaults
         self.top_k = top_k
+        self.search_multiplier = config.get('search_k_multiplier', 10) if config else 10
         self._load_index()
 
     def _load_index(self):
@@ -65,33 +94,41 @@ class FAISSRetriever:
         return self.model.encode([text], convert_to_numpy=True).astype("float32")
 
     def _matches_filters(self, metadata: Dict, filters: Dict) -> bool:
-        """Checks if the metadata dictionary matches the provided filters."""
+        """
+        Checks if the metadata dictionary matches the provided filters.
+        Supports pdf_page fallback: if filtering by "page" but metadata has "pdf_page",
+        also check pdf_page as fallback for visible page number matching.
+        """
         for key, value in filters.items():
-            if metadata.get(key) != value:
-                return False
+            # Direct match
+            if metadata.get(key) == value:
+                continue
+            # Fallback: if filtering by "page", also check "pdf_page"
+            if key == "page" and metadata.get("pdf_page") == value:
+                continue
+            return False
         return True
 
     def retrieve(self, query: str, filters: Optional[Dict] = None, top_k: Optional[int] = None) -> List[Dict]:
-        """
-        Retrieves the most similar text chunks for a single query using FAISS.
-        Supports metadata filtering by scanning a larger candidate pool.
+        """Retrieve most similar text chunks for a query using FAISS.
 
         Args:
-            query (str): The query string.
-            filters (Optional[Dict]): Metadata filters (e.g., {"page": 5}).
-            top_k (Optional[int]): Number of results to return. Defaults to self.top_k.
+            query: The query string.
+            filters: Metadata filters (e.g., {"page": 5}).
+            top_k: Number of results to return. Defaults to self.top_k.
 
         Returns:
-            List[Dict]: A list of result dictionaries containing text, score, and metadata.
+            List of result dicts containing text, score, and metadata.
         """
         if self.index is None:
             self._load_index()
 
         assert self.index is not None, "FAISS index must be loaded before searching"
         top_k = top_k or self.top_k
-        
-        # If filters are applied, search for more candidates to ensure we find enough matches
-        search_k = top_k * 10 if filters else top_k
+
+        # Use config multiplier or default 10 for filtered searches
+        search_multiplier = getattr(self, 'search_multiplier', 10)
+        search_k = top_k * search_multiplier if filters else top_k
         vector = self.embed(query)
         distances, indices = self.index.search(vector.reshape(1, -1), search_k)
 
@@ -137,13 +174,13 @@ class FAISSRetriever:
 class BM25Retriever:
     """Keyword-based retriever using the BM25 algorithm on document chunks."""
 
-    def __init__(self, corpus_metadata: List[Dict], top_k: int = 3):
-        """
-        Initializes the BM25 retriever.
+    def __init__(self, corpus_metadata: List[Dict], top_k: int = None, config: dict = None):
+        """Initialize BM25 retriever with optional config.
 
         Args:
-            corpus_metadata (List[Dict]): List of chunks with 'text' and 'metadata'.
-            top_k (int): Number of results to retrieve.
+            corpus_metadata: List of chunks with 'text' and 'metadata'.
+            top_k: Number of results to retrieve.
+            config: Optional config dict.
         """
         self.corpus_metadata = corpus_metadata
         self.top_k = top_k
@@ -162,10 +199,19 @@ class BM25Retriever:
         return re.findall(r"\w+", text.lower())
 
     def _matches_filters(self, metadata: Dict, filters: Dict) -> bool:
-        """Checks if the metadata dictionary matches the provided filters."""
+        """
+        Checks if the metadata dictionary matches the provided filters.
+        Supports pdf_page fallback: if filtering by "page" but metadata has "pdf_page",
+        also check pdf_page as fallback for visible page number matching.
+        """
         for key, value in filters.items():
-            if metadata.get(key) != value:
-                return False
+            # Direct match
+            if metadata.get(key) == value:
+                continue
+            # Fallback: if filtering by "page", also check "pdf_page"
+            if key == "page" and metadata.get("pdf_page") == value:
+                continue
+            return False
         return True
 
     def retrieve(self, query: str, filters: Optional[Dict] = None, top_k: Optional[int] = None) -> List[Dict]:
@@ -212,37 +258,38 @@ class BM25Retriever:
 class SQLiteRetriever:
     """Retrieves candidate table rows from SQLite based on query keywords."""
 
-    def __init__(self, db_path: str, top_k: int = 3):
-        """
-        Initializes the SQLite retriever.
+    def __init__(self, db_path: str, top_k: int = None, config: dict = None):
+        """Initialize SQLite retriever with optional config.
 
         Args:
-            db_path (str): Path to the SQLite database.
-            top_k (int): Number of table rows to retrieve.
+            db_path: Path to the SQLite database.
+            top_k: Number of table rows to retrieve.
+            config: Optional config dict with sql_stop_words and sql_keywords_limit.
         """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"SQLite database not found at {self.db_path}")
         self.top_k = top_k
 
+        # Load stop words and keywords limit from config
+        default_stop_words = {"what", "why", "how", "is", "the", "for", "and", "from",
+                              "to", "in", "of", "a", "an", "on", "with", "by", "year",
+                              "fy", "q", "icici"}
+        self.stop_words = config.get('sql_stop_words', default_stop_words) if config else default_stop_words
+        self.keywords_limit = config.get('sql_keywords_limit', 6) if config else 6
+
     def _query_keywords(self, query: str) -> List[str]:
-        """
-        Extracts significant keywords from a query for SQL LIKE matching.
+        """Extract significant keywords from query for SQL LIKE matching.
 
         Args:
-            query (str): The user query.
+            query: The user query.
 
         Returns:
-            List[str]: A list of lowercase keywords, filtered for stop words.
+            List of lowercase keywords filtered for stop words, capped by keywords_limit.
         """
         tokens = re.findall(r"\b[a-zA-Z]{3,}\b", query.lower())
-        stop_words = {
-            "what", "why", "how", "is", "the", "for", "and", "from",
-            "to", "in", "of", "a", "an", "on", "with", "by", "year",
-            "fy", "q", "icici",
-        }
-        keywords = [tok for tok in tokens if tok not in stop_words]
-        return keywords[:6]
+        keywords = [tok for tok in tokens if tok not in self.stop_words]
+        return keywords[:self.keywords_limit]
 
     def retrieve(self, query: str, filters: Optional[Dict] = None, top_k: Optional[int] = None) -> List[Dict]:
         """
@@ -265,12 +312,20 @@ class SQLiteRetriever:
         params: List[object] = [f"%{keyword}%" for keyword in keywords]
         
         sql = f"SELECT file_source, page_number, table_data FROM financial_tables WHERE ({' OR '.join(clauses)})"
-        
+
         # Metadata-aware pre-filtering via SQL WHERE clause
         if filters:
             for key, val in filters.items():
                 # Map common metadata keys to table column names
-                col = "page_number" if key == "page" else "file_source" if key == "source" else key
+                # Handle "page" filter with pdf_page fallback
+                if key == "page":
+                    # Try page_number column (internal), fallback to pdf_page if needed
+                    # Note: SQLite stores internal page number; pdf_page would need separate column
+                    col = "page_number"
+                elif key == "pdf_page":
+                    col = "page_number"  # Map pdf_page to page_number for now
+                else:
+                    col = "file_source" if key == "source" else key
                 sql += f" AND {col} = ?"
                 params.append(val)
         
@@ -313,16 +368,17 @@ class HybridRetriever:
         faiss_retriever: FAISSRetriever,
         bm25_retriever: Optional[BM25Retriever] = None,
         sqlite_retriever: Optional[SQLiteRetriever] = None,
-        top_k: int = 3,
+        top_k: int = None,
+        config: dict = None,
     ):
-        """
-        Initializes the HybridRetriever.
+        """Initialize HybridRetriever with optional config.
 
         Args:
-            faiss_retriever (FAISSRetriever): Instance for semantic search.
-            bm25_retriever (Optional[BM25Retriever]): Instance for keyword-based ranking.
-            sqlite_retriever (Optional[SQLiteRetriever]): Instance for structured table search.
-            top_k (int): Total results to return after merging.
+            faiss_retriever: Instance for semantic search.
+            bm25_retriever: Instance for keyword-based ranking.
+            sqlite_retriever: Instance for structured table search.
+            top_k: Total results to return after merging.
+            config: Optional config dict passed to retrievers.
         """
         self.faiss_retriever = faiss_retriever
         self.bm25_retriever = bm25_retriever
@@ -330,20 +386,20 @@ class HybridRetriever:
         self.top_k = top_k
 
     def _merge(self, faiss_results: List[Dict], bm25_results: List[Dict], sqlite_results: List[Dict]) -> List[Dict]:
-        """
-        Deduplicates and sorts results from different sources.
+        """Deduplicate and rank results from multiple retrievers.
 
         Args:
-            faiss_results (List[Dict]): Results from semantic search.
-            bm25_results (List[Dict]): Results from BM25 ranking.
-            sqlite_results (List[Dict]): Results from SQL keyword search.
+            faiss_results: Semantic search results (inner product, higher=better).
+            bm25_results: Keyword search results (TF-IDF score, higher=better).
+            sqlite_results: Structured table results (unscored).
 
         Returns:
-            List[Dict]: Combined list sorted primarily by source then score.
+            Combined list sorted by source priority (FAISS > BM25 > SQLite) then score.
         """
         combined = []
         seen_texts = set()
 
+        # Deduplicate by exact text match
         for item in faiss_results + bm25_results + sqlite_results:
             text_key = item.get("text", "").strip()
             if not text_key or text_key in seen_texts:
@@ -439,8 +495,11 @@ class AnswerAggregator:
 
         for i, item in enumerate(retrieval_results, 1):
             source_meta = item.get("metadata", {})
+            # Use pdf_page if available (visible page number), fallback to internal page
+            pdf_page = source_meta.get("pdf_page")
+            display_page = pdf_page if pdf_page is not None else source_meta.get("page")
             prompt.append(
-                f"[{i}] Source: {item.get('source_type', 'unknown')} (Page: {source_meta.get('page')}, Type: {source_meta.get('type')})"
+                f"[{i}] Source: {item.get('source_type', 'unknown')} (Page: {display_page}, Type: {source_meta.get('type')})"
             )
             prompt.append(f"Content: {item.get('text','').strip()}")
             prompt.append("")
@@ -466,7 +525,10 @@ class AnswerAggregator:
         if not self.llm:
             lines = [f"Query: {query}"]
             for i, item in enumerate(retrieval_results, 1):
-                lines.append(f"[{i}] {item.get('source_type')} (Page {item.get('metadata', {}).get('page')}): {item.get('text', '')[:150]}...")
+                meta = item.get("metadata", {})
+                pdf_page = meta.get("pdf_page")
+                display_page = pdf_page if pdf_page is not None else meta.get("page")
+                lines.append(f"[{i}] {item.get('source_type')} (Page {display_page}): {item.get('text', '')[:150]}...")
             return "\n".join(lines)
 
         try:
@@ -496,7 +558,10 @@ class AnswerAggregator:
             lines = [f"Query: {query}"]
             lines.append("LLM unavailable - showing retrieved evidence:")
             for item in retrieval_results:
-                lines.append(f"- {item.get('source_type')} source page {item.get('metadata', {}).get('page')}: {item.get('text', '')[:200]}...")
+                meta = item.get("metadata", {})
+                pdf_page = meta.get("pdf_page")
+                display_page = pdf_page if pdf_page is not None else meta.get("page")
+                lines.append(f"- {item.get('source_type')} source page {display_page}: {item.get('text', '')[:200]}...")
             return "\n".join(lines)
 
     def aggregate_all(self, queries: List[str], retrieval_map: Dict[str, List[Dict]]) -> Dict[str, str]:

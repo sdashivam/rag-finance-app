@@ -1,3 +1,14 @@
+"""
+Benchmark runner for RAG pipeline evaluation.
+
+Executes end-to-end pipeline on golden QA dataset, capturing:
+- Retrieval precision and source attribution
+- Answer quality metrics (faithfulness, relevance, groundedness)
+- Latency breakdown across pipeline stages
+
+Compares hybrid retrieval modes (with/without BM25) for optimization.
+"""
+
 import yaml
 import os
 import time
@@ -30,16 +41,29 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return super(NumpyEncoder, self).default(obj)
 
-def load_config():
-    """Loads configuration from config.yaml in the project root."""
+def load_config() -> dict:
+    """Load configuration from config.yaml in project root.
+
+    Returns:
+        Configuration dictionary with paths, models, and pipeline settings.
+    """
     config_path = os.path.join(root_dir, 'config.yaml')
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
+
 def run_benckmark():
-    """
-    Executes the end-to-end RAG pipeline for every entry in the golden set.
-    Results and logs are saved inside the 'benckmark_result' directory.
+    """Execute RAG pipeline on golden QA dataset.
+
+    Runs both "with_bm25" and "without_bm25" modes, capturing:
+    - Latency per pipeline stage
+    - Retrieval quality metrics
+    - Generated answer evaluation scores
+
+    Outputs:
+        benchmark/result/benckmark_output_with_bm25.json
+        benchmark/result/benckmark_output_without_bm25.json
+        benchmark/result/benckmark.log
     """
     config = load_config()
 
@@ -47,9 +71,9 @@ def run_benckmark():
     output_path = config.get('output_path', 'output')
     if not os.path.isabs(output_path):
         output_path = os.path.join(root_dir, output_path)
-    
-    # Folder for benchmark outputs as per request
-    benckmark_result_dir = os.path.join(output_path, 'benckmark_result')
+
+    # Use benchmark/result folder instead of output/benchmark_result
+    benckmark_result_dir = os.path.join(root_dir, 'benchmarks', 'result')
     os.makedirs(benckmark_result_dir, exist_ok=True)
     
     db_path = config.get('db_path')
@@ -92,6 +116,12 @@ def run_benckmark():
         parser = PDFParser(input_file)
         parsed_data = parser.parse()
 
+        # Apply page offset if configured (e.g., offset=138 for PDFs starting at page 138)
+        page_offset = config.get("page_offset", 0)
+        if page_offset > 0:
+            logger.info(f"Applying page offset: {page_offset}")
+            parsed_data = PDFParser.apply_page_offset(parsed_data, page_offset)
+
         if db_path and parsed_data.get("tables"):
             logger.info(f"Pipeline Step: Saving tables to SQLite: {db_path}")
             db_mgr = SQLiteManager(db_path)
@@ -107,7 +137,7 @@ def run_benckmark():
         indexer.save(output_path, output_file_name, metadata_file_name)
 
     # 2. Loading Golden Set
-    golden_set_path = os.path.join(root_dir, 'benckmarks', 'golden_qa_dataset.json')
+    golden_set_path = os.path.join(root_dir, 'benchmarks', 'golden_qa_dataset.json')
     if not os.path.exists(golden_set_path):
         logger.error(f"Golden set file not found at {golden_set_path}. Benchmark aborted.")
         return
@@ -117,21 +147,22 @@ def run_benckmark():
 
     # 3. Pipeline Initialization
     llm = ChatOllama(model=config['llm_model'], temperature=config['llm_temperature'], base_url=config['llm_base_url'])
-    query_processor = QueryProcessor(llm=llm)
+    query_processor = QueryProcessor(llm=llm, config=config)
     runtime_engine = RuntimeMetrics()
-    retrieval_engine = RetrievalMetrics()
+    retrieval_engine = RetrievalMetrics(config=config)
 
     faiss_retriever = FAISSRetriever(
         index_path=os.path.join(output_path, output_file_name),
         metadata_path=os.path.join(output_path, metadata_file_name),
         model_name=config['retriever_model'],
         top_k=config['retrieval_top_k'],
+        config=config,
     )
-    bm25_retriever = BM25Retriever(corpus_metadata=faiss_retriever.metadata, top_k=config['retrieval_top_k'])
-    sqlite_retriever = SQLiteRetriever(db_path=db_path, top_k=config['retrieval_top_k']) if os.path.exists(db_path) else None
+    bm25_retriever = BM25Retriever(corpus_metadata=faiss_retriever.metadata, top_k=config['retrieval_top_k'], config=config)
+    sqlite_retriever = SQLiteRetriever(db_path=db_path, top_k=config['retrieval_top_k'], config=config) if os.path.exists(db_path) else None
 
-    hybrid_retriever = HybridRetriever(faiss_retriever=faiss_retriever, bm25_retriever=bm25_retriever, 
-                                     sqlite_retriever=sqlite_retriever, top_k=config['retrieval_top_k'])
+    hybrid_retriever = HybridRetriever(faiss_retriever=faiss_retriever, bm25_retriever=bm25_retriever,
+                                     sqlite_retriever=sqlite_retriever, top_k=config['retrieval_top_k'], config=config)
     answer_aggregator = AnswerAggregator(llm=llm)
 
     # 4. Run Benchmark Comparison Loop
@@ -143,10 +174,11 @@ def run_benckmark():
         # Passing None to bm25_retriever disables the BM25 branch in the hybrid retrieval logic
         current_bm25 = bm25_retriever if mode == "with_bm25" else None
         hybrid_retriever = HybridRetriever(
-            faiss_retriever=faiss_retriever, 
-            bm25_retriever=current_bm25, 
-            sqlite_retriever=sqlite_retriever, 
-            top_k=config['retrieval_top_k']
+            faiss_retriever=faiss_retriever,
+            bm25_retriever=current_bm25,
+            sqlite_retriever=sqlite_retriever,
+            top_k=config['retrieval_top_k'],
+            config=config,
         )
 
         results = []
@@ -201,14 +233,16 @@ def run_benckmark():
                 
                 # Evaluation metrics (RAGAS)
                 all_contexts = [ctx['text'] for q_res in retrieval_results.values() for ctx in q_res if ctx.get("text")]
-                quality_scores = retrieval_engine.get_quality_scores(query=query, answer=final_answer, 
+                # Use "answer" as ground_truth fallback if "ground_truth" not provided
+                ground_truth = item.get("ground_truth") or item.get("answer", "")
+                quality_scores = retrieval_engine.get_quality_scores(query=query, answer=final_answer,
                                                                 contexts=all_contexts, llm=llm,
                                                                 embeddings=faiss_retriever.model,
-                                                                ground_truth=item.get("ground_truth", ""))
-                
+                                                                ground_truth=ground_truth)
+
                 results.append({
-                    "query": query, 
-                    "ground_truth": item.get("ground_truth", ""), 
+                    "query": query,
+                    "ground_truth": ground_truth, 
                     "generated_answer": final_answer, 
                     "latency_s": latency, 
                     "quality_metrics": quality_scores,

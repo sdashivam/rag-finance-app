@@ -1,19 +1,38 @@
+"""
+SQLite database manager for financial document table storage.
+
+Handles structured storage of extracted PDF tables with metadata
+for keyword-based retrieval and structured data queries.
+"""
+
 import sqlite3
 import json
 import os
 
+
 class SQLiteManager:
-    """
-    Handles structured storage of financial tables in SQLite.
+    """Manages persistent storage of extracted financial tables.
+
+    Responsibilities:
+    - Create and maintain financial_tables schema
+    - Insert parsed table data with source and page metadata
+    - Handle duplicate cleanup on re-parsing
+
+    Attributes:
+        conn: SQLite connection instance
     """
     def __init__(self, db_path: str):
-        # Ensure directory exists
+        """Initialize SQLiteManager with database path.
+
+        Args:
+            db_path: Path to SQLite database file.
+        """
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self._setup_db()
 
     def _setup_db(self):
-        """Creates the necessary table structure for financial data."""
+        """Create financial_tables schema if not exists."""
         with self.conn:
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS financial_tables (
@@ -26,7 +45,12 @@ class SQLiteManager:
             """)
 
     def insert_tables(self, file_path: str, tables: list):
-        """Inserts list of table dictionaries into the database."""
+        """Insert parsed table data with duplicate cleanup.
+
+        Args:
+            file_path: Source PDF file path.
+            tables: List of table dicts from PDFParser.
+        """
         normalized_source = os.path.abspath(file_path)
         with self.conn:
             self.conn.execute(
@@ -41,5 +65,6 @@ class SQLiteManager:
         print(f"Successfully stored {len(tables)} tables in SQLite.")
 
     def close(self):
+        """Close SQLite connection."""
         if self.conn:
             self.conn.close()
